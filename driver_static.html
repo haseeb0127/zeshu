@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Zeshu Driver Tracker</title>
+    <style>
+        body { 
+            background: #020617; color: white; font-family: Arial, sans-serif; 
+            display: flex; flex-direction: column; align-items: center; 
+            justify-content: center; height: 100vh; margin: 0;
+        }
+        .container { text-align: center; width: 100%; max-width: 350px; }
+        input { 
+            width: 90%; padding: 15px; margin: 15px 0; border-radius: 8px; 
+            border: 2px solid #3b82f6; background: transparent; color: white; font-size: 16px;
+        }
+        button { 
+            width: 100%; padding: 15px; background: #3b82f6; color: white; 
+            border: none; border-radius: 8px; font-size: 18px; font-weight: bold; cursor: pointer;
+        }
+        button:active { background: #2563eb; }
+        #status { margin-top: 20px; font-size: 16px; color: #9ca3af; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1 style="color: #3b82f6; margin-bottom: 5px;">📍 ZESHU</h1>
+        <h2>WEB DRIVER</h2>
+        
+        <input type="text" id="orderId" placeholder="Enter Order ID (e.g. 14789)">
+        <button onclick="startTracking()">Start Live Tracking</button>
+        
+        <p id="status">Waiting for start...</p>
+    </div>
+
+    <script>
+        function startTracking() {
+            const oid = document.getElementById("orderId").value.trim();
+            const status = document.getElementById("status");
+            
+            if (!oid) { 
+                status.innerText = "⚠️ Please enter an Order ID"; 
+                return; 
+            }
+
+            status.innerText = "🛰️ Requesting GPS Permission...";
+
+            if (navigator.geolocation) {
+                navigator.geolocation.watchPosition(
+                    async function(position) {
+                        const lat = position.coords.latitude;
+                        const lng = position.coords.longitude;
+                        
+                        try {
+                            const response = await fetch(`https://zeshu-api.onrender.com/admin/update-location/${oid}`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ lat: lat, lng: lng })
+                            });
+                            
+                            if(response.ok) {
+                                status.innerText = `✅ Live Syncing: ${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+                                status.style.color = "#22c55e"; 
+                            } else {
+                                const errorDetails = await response.text();
+                                status.innerText = `⚠️ Server says: ${errorDetails}`;
+                                status.style.color = "orange";
+                            }
+                        } catch (error) {
+                            status.innerText = "❌ Cloud Sync Error";
+                            status.style.color = "#ef4444";
+                        }
+                    },
+                    function(error) {
+                        status.innerText = `❌ GPS Blocked.`;
+                        status.style.color = "#ef4444";
+                    },
+                    { enableHighAccuracy: true, maximumAge: 0 }
+                );
+            } else {
+                status.innerText = "❌ GPS not supported on this device";
+            }
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "builds": [
+    {
+      "src": "driver_main.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "driver_main.py"
+    }
+  ]
+}
