@@ -50,6 +50,10 @@ class Product(BaseModel):
     price: float
     image_url: str
 
+class LocationUpdate(BaseModel):
+    lat: float
+    lng: float
+
 # --- BACKGROUND NOTIFICATION ENGINES ---
 def send_whatsapp_receipt(phone: str, order_id: int, total: float):
     if TWILIO_ACCOUNT_SID != "WAITING":
@@ -157,6 +161,28 @@ def get_active():
     cur.close()
     conn.close()
     return rows
+
+# --- 5.5 UPDATE DRIVER LOCATION ---
+@app.post("/admin/update-location/{order_id}")
+def update_location(order_id: int, loc: LocationUpdate):
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        
+        # Upsert: Update if exists, insert if new
+        cur.execute("""
+            INSERT INTO delivery_tracking (order_id, lat, lng, last_updated)
+            VALUES (%s, %s, %s, NOW())
+            ON CONFLICT (order_id) DO UPDATE 
+            SET lat = EXCLUDED.lat, lng = EXCLUDED.lng, last_updated = NOW()
+        """, (order_id, loc.lat, loc.lng))
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"status": "success"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
 
 # --- 6. INVENTORY UPLOADER (NEW!) ---
 @app.post("/admin/add-product")

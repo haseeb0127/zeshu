@@ -2,7 +2,8 @@ import flet as ft
 import httpx
 import flet_map as fm
 
-API_URL = "https://zeshu-api.onrender.com"
+# Point this to your live Vercel server!
+API_URL = "https://www.zeshu.in"
 
 def main(page: ft.Page):
     page.title = "Zeshu God Mode"

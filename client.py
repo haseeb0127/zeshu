@@ -1,22 +1,22 @@
 import flet as ft
 import httpx
 
-# Point this to your FastAPI server 
-API_BASE_URL = "http://127.0.0.1:8000"
+# Point this to your live Vercel server!
+API_BASE_URL = "https://www.zeshu.in"
 
 async def main(page: ft.Page):
-    # --- SETUP & STATE ---
+    # --- 1. SETUP & STATE ---
     page.title = "Zeshu - Jagtial Quick Commerce"
     page.window_width = 400
     page.window_height = 800
     page.bgcolor = ft.Colors.GREY_50
     page.theme_mode = ft.ThemeMode.LIGHT
     
-    cart = {} 
+    cart = {} # {product_id: quantity}
     products_data = []
     product_list = ft.ListView(expand=True, spacing=10, padding=15)
 
-    # --- LOGIC: UPDATE UI ---
+    # --- 2. LOGIC: UPDATE UI ---
     def update_cart_ui():
         total_items = sum(cart.values())
         total_price = sum(next((p['price'] for p in products_data if p['id'] == p_id), 0) * qty for p_id, qty in cart.items())
@@ -29,22 +29,21 @@ async def main(page: ft.Page):
             cart_bar.visible = False
         page.update()
 
-    # --- LOGIC: CHECKOUT ---
+    # --- 3. LOGIC: CHECKOUT ---
     async def open_checkout(e):
         items_list = []
-        cart_items_payload = [] 
         total_price = 0
         
         for p_id, qty in cart.items():
             p = next((item for item in products_data if item['id'] == p_id), None)
             if p:
                 items_list.append(f"{p['name']} x{qty}")
-                cart_items_payload.append({"id": p['id'], "qty": qty})
                 total_price += p['price'] * qty
         
         summary_text = ", ".join(items_list)
         
         phone_input = ft.TextField(label="Phone Number", hint_text="10-digit mobile number")
+        email_input = ft.TextField(label="Email (for receipt)", hint_text="Optional")
         address_input = ft.TextField(label="Delivery Address in Jagtial", hint_text="House No, Area Name...")
 
         bs = ft.BottomSheet(ft.Container(padding=20))
@@ -59,20 +58,19 @@ async def main(page: ft.Page):
 
             order_data = {
                 "phone": phone_input.value,
-                "email": "", 
+                "email": email_input.value, 
                 "items_summary": summary_text,
-                "cart_items": cart_items_payload, 
                 "total_price": total_price,
                 "address": address_input.value
             }
 
             async with httpx.AsyncClient() as client:
                 try:
-                    res = await client.post(f"{API_BASE_URL}/place-order", json=order_data)
+                    # Sending the order to your live Vercel backend
+                    res = await client.post(f"{API_BASE_URL}/admin/add-order", json=order_data)
                     if res.status_code == 200:
                         cart.clear()
                         bs.open = False 
-                        # Refresh data from server to get updated stock!
                         await load_data() 
                         update_cart_ui()
                         page.dialog = ft.AlertDialog(
@@ -82,6 +80,8 @@ async def main(page: ft.Page):
                         )
                         page.dialog.open = True
                         page.update()
+                    else:
+                        print(f"Error: {res.text}")
                 except Exception as err:
                     print(f"Order Error: {err}")
 
@@ -91,6 +91,7 @@ async def main(page: ft.Page):
             ft.Text(f"Items: {summary_text}"),
             ft.Text(f"Total: ₹{total_price}", size=18, weight="bold", color=ft.Colors.GREEN_700),
             phone_input,
+            email_input,
             address_input,
             ft.ElevatedButton("Place Order", bgcolor=ft.Colors.GREEN_800, color="white", width=400, on_click=confirm_order),
         ], tight=True, spacing=15)
@@ -98,7 +99,7 @@ async def main(page: ft.Page):
         bs.open = True
         page.update()
 
-    # --- UI: CART BAR ---
+    # --- 4. UI: CART BAR ---
     cart_bar = ft.Container(
         content=ft.Row([
             ft.Text("0 Items", color=ft.Colors.WHITE, weight="bold"),
@@ -111,7 +112,7 @@ async def main(page: ft.Page):
         on_click=open_checkout 
     )
 
-    # --- LOGIC: QUANTITY SELECTOR ---
+    # --- 5. LOGIC: QUANTITY SELECTOR ---
     def update_quantity(p_id, change):
         current = cart.get(p_id, 0)
         new_qty = max(0, current + change)
@@ -120,7 +121,6 @@ async def main(page: ft.Page):
         refresh_product_list()
         update_cart_ui()
 
-    # --- UPDATED: Live Inventory Selector ---
     def create_selector(p_id, count, stock):
         if stock <= 0:
             return ft.Container(
@@ -150,19 +150,18 @@ async def main(page: ft.Page):
             ], spacing=0)
         )
 
-    # --- UPDATED: Live Inventory Refresh ---
     def refresh_product_list():
         product_list.controls.clear()
         for p in products_data:
             count = cart.get(p['id'], 0)
-            stock = p.get('stock', 0)
+            stock = p.get('stock', 100) # Default to 100 if stock is missing from DB
             
-            img_url = f"https://dummyimage.com/50x50/2e7d32/ffffff&text={p['name'][:3].upper()}"
+            img_url = p.get('image_url', f"https://dummyimage.com/50x50/2e7d32/ffffff&text={p['name'][:3].upper()}")
 
             product_list.controls.append(
                 ft.Card(
                     elevation=0.5,
-                    opacity=1.0 if stock > 0 else 0.5, # Gray out if empty!
+                    opacity=1.0 if stock > 0 else 0.5, 
                     content=ft.Container(
                         padding=12,
                         content=ft.Row([
@@ -172,21 +171,25 @@ async def main(page: ft.Page):
                                 ft.Text(f"₹{p['price']}"),
                                 ft.Text(f"Stock: {stock}", size=10, color=ft.Colors.GREY_500) if stock > 0 else ft.Container()
                             ], expand=True),
-                            create_selector(p['id'], count, stock) # Passed stock here!
+                            create_selector(p['id'], count, stock)
                         ])
                     )
                 )
             )
         page.update()
 
-    # --- INITIALIZATION ---
+    # --- 6. INITIALIZATION ---
     async def load_data():
         nonlocal products_data
         try:
             async with httpx.AsyncClient() as client:
-                res = await client.get(f"{API_BASE_URL}/products")
-                products_data = res.json()
-                refresh_product_list()
+                # Fetching live products from your Vercel database
+                res = await client.get(f"{API_BASE_URL}/catalog")
+                if res.status_code == 200:
+                    products_data = res.json()
+                    refresh_product_list()
+                else:
+                    print(f"Failed to fetch catalog. Status: {res.status_code}")
         except Exception as e:
             print(f"Server offline: {e}")
 
@@ -204,4 +207,5 @@ async def main(page: ft.Page):
     await load_data()
 
 if __name__ == "__main__":
-    ft.run(main, view=ft.AppView.WEB_BROWSER, port=5000)
+    # Feel free to change port to 5001 if 5000 gives you the socket error!
+    ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=5000)

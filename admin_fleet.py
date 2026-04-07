@@ -4,6 +4,10 @@ import httpx
 import asyncio
 import math
 
+# --- CONFIGURATION ---
+# Point this to your live Vercel server!
+API_BASE_URL = "https://www.zeshu.in"
+
 # --- 📐 THE MATH ---
 def calculate_distance(lat1, lon1, lat2, lon2):
     R = 6371 
@@ -48,7 +52,7 @@ async def main(page: ft.Page):
         while True:
             try:
                 async with httpx.AsyncClient(timeout=10.0) as client:
-                    res = await client.get("https://zeshu-api.onrender.com/admin/get-all-active-locations")
+                    res = await client.get(f"{API_BASE_URL}/admin/get-all-active-locations")
                     if res.status_code == 200:
                         locations = res.json()
                         active_now_ids = set()
@@ -86,7 +90,7 @@ async def main(page: ft.Page):
     async def load_leaderboard():
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                res = await client.get("https://zeshu-api.onrender.com/admin/leaderboard")
+                res = await client.get(f"{API_BASE_URL}/admin/leaderboard")
                 if res.status_code == 200:
                     data = res.json()
                     leaderboard_list.controls.clear()
@@ -104,7 +108,7 @@ async def main(page: ft.Page):
     async def load_heatmap():
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                res = await client.get("https://zeshu-api.onrender.com/admin/heatmap")
+                res = await client.get(f"{API_BASE_URL}/admin/heatmap")
                 if res.status_code == 200:
                     data = res.json()
                     heatmap_layer.circles.clear()
@@ -124,7 +128,7 @@ async def main(page: ft.Page):
         e.control.disabled = True
         page.update()
         async with httpx.AsyncClient(timeout=15.0) as client:
-            url = f"https://zeshu-api.onrender.com/admin/complete-order/{order_id}"
+            url = f"{API_BASE_URL}/admin/complete-order/{order_id}"
             res = await client.post(url)
             if res.status_code == 200:
                 page.snack_bar = ft.SnackBar(ft.Text(f"Order #{order_id} Delivered!"), bgcolor="green")
@@ -169,7 +173,7 @@ async def main(page: ft.Page):
     async def fetch_orders():
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                res = await client.get("https://zeshu-api.onrender.com/admin/orders")
+                res = await client.get(f"{API_BASE_URL}/admin/orders")
                 if res.status_code == 200:
                     render_orders(res.json())
         except: pass
@@ -192,7 +196,6 @@ async def main(page: ft.Page):
             controls=[
                 ft.TabBar(
                     tabs=[
-                        # Changed 'text' to 'label' to fix the TypeError
                         ft.Tab(label="Live Tracking", icon=ft.Icons.SATELLITE_ALT),
                         ft.Tab(label="Heatmap", icon=ft.Icons.MAP),
                         ft.Tab(label="Leaderboard", icon=ft.Icons.LEADERBOARD),

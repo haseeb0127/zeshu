@@ -4,7 +4,7 @@ import httpx
 import asyncio
 
 # --- CONFIGURATION ---
-BASE_URL = "https://zeshu-api.onrender.com"
+BASE_URL = "https://www.zeshu.in"
 
 # --- HELPER FUNCTIONS (Design & Hover) ---
 def toggle_hover(e):

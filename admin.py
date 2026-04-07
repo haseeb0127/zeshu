@@ -4,6 +4,10 @@ import httpx
 import asyncio
 import math
 
+# --- CONFIGURATION ---
+# Point this to your live Vercel server!
+API_BASE_URL = "https://www.zeshu.in"
+
 # --- 📐 THE MATH: Haversine Formula ---
 def calculate_distance(lat1, lon1, lat2, lon2):
     R = 6371 
@@ -53,8 +57,8 @@ async def main(page: ft.Page):
         while True:
             try:
                 async with httpx.AsyncClient() as client:
-                    # NEW ENDPOINT: Fetch all active coordinates at once
-                    res = await client.get("https://zeshu-api.onrender.com/admin/get-all-active-locations")
+                    # Fetch all active coordinates from your LIVE server
+                    res = await client.get(f"{API_BASE_URL}/admin/get-all-active-locations")
                     if res.status_code == 200:
                         locations = res.json()
                         active_now_ids = set()
@@ -124,7 +128,8 @@ async def main(page: ft.Page):
     async def fetch_orders():
         nonlocal all_orders_data
         async with httpx.AsyncClient() as client:
-            res = await client.get("https://zeshu-api.onrender.com/admin/orders")
+            # Fetch orders from your LIVE server
+            res = await client.get(f"{API_BASE_URL}/admin/orders")
             all_orders_data = res.json()
             render_orders(all_orders_data)
 
