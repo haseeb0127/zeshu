@@ -32,7 +32,7 @@ SUPABASE_URL = "https://isofiudzgpuxgenzicdb.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlzb2ZpdWR6Z3B1eGdlbnppY2RiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU5MDQ5NDQsImV4cCI6MjA5MTQ4MDk0NH0.iLa4Bw_jVdu1TwtouQR97dXZC6hycj1Qp3kMet4zixw"
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# 3. Setup SQLite Database for Orders
+# 3. Setup SQLite Database for Orders & Products
 DB_PATH = "/tmp/zeshu.db"
 
 def init_db():
@@ -40,17 +40,21 @@ def init_db():
     cursor = conn.cursor()
     cursor.execute('DROP TABLE IF EXISTS products') 
     cursor.execute('''CREATE TABLE IF NOT EXISTS users (phone TEXT UNIQUE, email TEXT, address TEXT)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY, name TEXT, price REAL, stock INTEGER, image_url TEXT)''')
+    # Added "unit" column for your grocery items
+    cursor.execute('''CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY, name TEXT, price REAL, stock INTEGER, image_url TEXT, unit TEXT)''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY, items_summary TEXT, total_price REAL, address TEXT, phone TEXT)''')
     
     cursor.execute("SELECT COUNT(*) FROM products")
     if cursor.fetchone()[0] == 0:
+        # Added your new grocery data directly into the database!
         products = [
-            (1, "Aashirvaad Atta 5kg", 250.0, 50, "https://m.media-amazon.com/images/I/71R8P8XzC9L._SX679_.jpg"),
-            (2, "Amul Gold Milk 1L", 66.0, 100, "https://m.media-amazon.com/images/I/61N+V3qD3hL._SX679_.jpg"),
-            (3, "Lays Magic Masala", 20.0, 200, "https://m.media-amazon.com/images/I/71XmO4g36yL._SX679_.jpg")
+            (1, "Vegetables & Fruits", 149.0, 50, "https://cdn-icons-png.flaticon.com/512/3194/3194591.png", "1 kg"),
+            (2, "Atta, Rice & Dal", 299.0, 100, "https://cdn-icons-png.flaticon.com/512/5753/5753696.png", "5 kg"),
+            (3, "Oil, Ghee & Masala", 180.0, 200, "https://cdn-icons-png.flaticon.com/512/9944/9944111.png", "1 L"),
+            (4, "Dairy, Bread & Eggs", 66.0, 200, "https://cdn-icons-png.flaticon.com/512/869/869474.png", "1 L"),
+            (5, "Cold Coffee", 50.0, 200, "https://cdn-icons-png.flaticon.com/512/924/924514.png", "250 ml")
         ]
-        cursor.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?)", products)
+        cursor.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?, ?)", products)
     conn.commit()
     conn.close()
 
@@ -71,16 +75,16 @@ class RechargeRequest(BaseModel):
 def read_root():
     return {"status": "online", "message": "Zeshu Backend is running securely!"}
 
-# FIXED: Changed from /products to /api/products so the app can find it!
+# FIXED: Now returns the exact format your frontend is expecting
 @app.get("/api/products")
 async def get_products():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute("SELECT id, name, price, stock, image_url FROM products")
+    cursor.execute("SELECT id, name, price, stock, image_url, unit FROM products")
     products = [dict(row) for row in cursor.fetchall()]
     conn.close()
-    return products
+    return {"status": "success", "data": products}
 
 # RESTORED: The actual live A1Topup connection!
 @app.post("/api/recharge")
@@ -145,6 +149,7 @@ async def create_payment_link(request: Request):
         razorpay_response = response.json()
         return {"payment_url": razorpay_response.get("short_url")}
 
+# FIXED: Removed the accidentally pasted /api/products route from inside this function
 @app.get("/api/recommendations")
 async def get_recommendations(cart_categories: str):
     try:
