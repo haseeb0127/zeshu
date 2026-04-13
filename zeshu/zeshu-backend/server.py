@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from supabase import create_client, Client
 import sqlite3
 import httpx 
@@ -15,7 +16,7 @@ app = FastAPI(title="Zeshu Production Engine")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Allowing all for now to prevent CORS blocking
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -55,11 +56,23 @@ def init_db():
 
 init_db()
 
+# --- DATA MODELS ---
+class RechargeRequest(BaseModel):
+    operator_code: str
+    number: str
+    amount: int
+    order_id: str
+    dob: str = None 
+
+# --- API ENDPOINTS ---
+
+@app.head("/")
 @app.get("/")
 def read_root():
     return {"status": "online", "message": "Zeshu Backend is running securely!"}
 
-@app.get("/products")
+# FIXED: Changed from /products to /api/products so the app can find it!
+@app.get("/api/products")
 async def get_products():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -68,6 +81,22 @@ async def get_products():
     products = [dict(row) for row in cursor.fetchall()]
     conn.close()
     return products
+
+# RESTORED: The actual live A1Topup connection!
+@app.post("/api/recharge")
+def process_recharge(req: RechargeRequest):
+    # 13 is the circle code for AP/Telangana
+    url = f"https://business.a1topup.com/recharge/api?username={A1_USERNAME}&pwd={A1_PASSWORD}&circlecode=13&operatorcode={req.operator_code}&number={req.number}&amount={req.amount}&orderid={req.order_id}&format=json"
+    
+    if req.dob:
+        url += f"&value1={req.dob}"
+        
+    try:
+        response = requests.get(url)
+        data = response.json()
+        return data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/admin/add-order") 
 async def add_order(request: Request):
@@ -89,7 +118,6 @@ async def add_order(request: Request):
     
     return {"status": "success", "id": order_id}
 
-# FIXED: Separated the Razorpay function so it doesn't crash
 @app.post("/create-payment-link")
 async def create_payment_link(request: Request):
     data = await request.json()
@@ -117,7 +145,6 @@ async def create_payment_link(request: Request):
         razorpay_response = response.json()
         return {"payment_url": razorpay_response.get("short_url")}
 
-# FIXED: Moved recommendations outside of the Razorpay function
 @app.get("/api/recommendations")
 async def get_recommendations(cart_categories: str):
     try:
