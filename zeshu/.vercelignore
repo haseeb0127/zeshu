@@ -1,0 +1,7 @@
+clean_web/
+dist/
+build/
+web_build/
+*.zip
+__pycache__/
+.flet/

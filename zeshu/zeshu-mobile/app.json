@@ -1,0 +1,26 @@
+{
+  "expo": {
+    "name": "zeshu-mobile",
+    "slug": "zeshu-mobile",
+    "version": "1.0.0",
+    "newArchEnabled": false,
+    "android": {
+      "package": "com.anonymous.zeshumobile",
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
+      ]
+    },
+    "plugins": [
+      "expo-font",
+      "expo-location",
+      "@react-native-voice/voice"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "14571cca-4a85-40b5-bb39-8815db4a5f0e"
+      }
+    }
+  }
+}

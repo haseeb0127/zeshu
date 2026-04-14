@@ -1,6 +1,8 @@
 fastapi
 uvicorn
 httpx
-requests
-python-dotenv
-supabase
+psycopg2-binary
+razorpay
+resend
+twilio
+pydantic
