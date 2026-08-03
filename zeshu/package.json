@@ -1,0 +1,7 @@
+{
+  "dependencies": {
+    "html5-qrcode": "^2.3.8",
+    "react-confetti": "^6.4.0",
+    "tailwindcss": "^4.3.3"
+  }
+}

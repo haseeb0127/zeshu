@@ -3,7 +3,6 @@
     "name": "zeshu-mobile",
     "slug": "zeshu-mobile",
     "version": "1.0.0",
-    "newArchEnabled": false,
     "android": {
       "package": "com.anonymous.zeshumobile",
       "permissions": [
