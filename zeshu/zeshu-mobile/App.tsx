@@ -80,11 +80,15 @@ function HomeScreen({ navigation }) {
   
   const [isLoggedIn, setIsLoggedIn] = useState(false); 
   const [userId, setUserId] = useState(null);
-  const [coinsBalance, setCoinsBalance] = useState(0);
+  const [rewardBalance, setRewardBalance] = useState(0);
+  const [rewardHistory, setRewardHistory] = useState([]);
+  const [referralCode, setReferralCode] = useState('');
+  const [referralInput, setReferralInput] = useState('');
+  const [referralMessage, setReferralMessage] = useState('');
+  const [referralApplying, setReferralApplying] = useState(false);
   
   const [isAccountOpen, setIsAccountOpen] = useState(false);
   const [showLoginModal, setShowLoginModal] = useState(false);
-  const [isCoinHistoryOpen, setIsCoinHistoryOpen] = useState(false); 
   
   const [loginStep, setLoginStep] = useState('phone'); 
   const [phoneNumber, setPhoneNumber] = useState('');
@@ -92,7 +96,8 @@ function HomeScreen({ navigation }) {
   const [isAuthLoading, setIsAuthLoading] = useState(false);
 
   const [isCartOpen, setIsCartOpen] = useState(false);
-  const [useZeshuCoins, setUseZeshuCoins] = useState(false);
+  const [useZeshuCash, setUseZeshuCash] = useState(false);
+  const [zeshuCashAmount, setZeshuCashAmount] = useState('');
   const [tipAmount, setTipAmount] = useState(20); 
   const [isDonating, setIsDonating] = useState(true); 
   const [currentAddress, setCurrentAddress] = useState('HotelRoom 205, 2nd floor Shree Amardeep...');
@@ -125,7 +130,6 @@ function HomeScreen({ navigation }) {
   const [mobilePublicReviews, setMobilePublicReviews] = useState([]);
   const [mobilePublicReviewsLoading, setMobilePublicReviewsLoading] = useState(false);
 
-  const ZESHU_COINS_VAL = 50;
   const HANDLING_FEE = 5;
 
   useEffect(() => {
@@ -143,13 +147,19 @@ function HomeScreen({ navigation }) {
     if (session) {
       setUserId(session.user.id);
       setIsLoggedIn(true);
-      fetchCoinBalance(session.user.id);
+      void loadGrowthData();
     }
   };
 
-  const fetchCoinBalance = async (uid) => {
-    const { data } = await supabase.from('wallets').select('coins').eq('user_id', uid).single();
-    if (data) setCoinsBalance(data.coins);
+  const loadGrowthData = async () => {
+    const [{ data: balance }, { data: history }, { data: code }] = await Promise.all([
+      supabase.rpc('get_my_reward_balance'),
+      supabase.rpc('get_my_reward_history', { p_limit: 20 }),
+      supabase.rpc('get_or_create_my_referral_code'),
+    ]);
+    setRewardBalance(Number(balance || 0));
+    setRewardHistory(history || []);
+    setReferralCode(String(code || ''));
   };
 
   // Real-time Tracker
@@ -236,6 +246,17 @@ function HomeScreen({ navigation }) {
     const haystack = [product?.name, product?.category, product?.weight, product?.unit].filter(Boolean).join(' ').replace(/\s+/g, ' ').toLowerCase();
     return (!normalizedSearch || haystack.includes(normalizedSearch)) && (!selectedCategory || String(product?.category || '').trim() === selectedCategory);
   });
+  const smartAddOns = useMemo(() => {
+    const vendorId = cart[0]?.item?.vendor_id;
+    if (!vendorId) return [];
+    const inCart = new Set(cart.map((entry) => String(entry.item.id)));
+    const seen = new Set();
+    return [...favoriteProducts, ...recentlyPurchased, ...products].filter((product) => {
+      const id = String(product?.id || '');
+      if (!id || seen.has(id) || inCart.has(id) || String(product.vendor_id) !== String(vendorId) || product.in_stock === false || (product.quantity !== null && Number(product.quantity) <= 0)) return false;
+      seen.add(id); return true;
+    }).slice(0, 4);
+  }, [cart, favoriteProducts, recentlyPurchased, products]);
 
   const handleAutoDetectLocation = async () => {
     setIsDetectingLoc(true);
@@ -283,7 +304,7 @@ function HomeScreen({ navigation }) {
       setUserId(data.session.user.id);
       setIsLoggedIn(true);
       setShowLoginModal(false);
-      fetchCoinBalance(data.session.user.id);
+      void loadGrowthData();
     } else {
       Alert.alert("Incorrect or expired OTP", "Please try again or request a new OTP.");
     }
@@ -291,8 +312,31 @@ function HomeScreen({ navigation }) {
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
-    setIsLoggedIn(false); setUserId(null); setCoinsBalance(0); setIsAccountOpen(false);
+    setIsLoggedIn(false); setUserId(null); setRewardBalance(0); setRewardHistory([]); setReferralCode(''); setUseZeshuCash(false); setZeshuCashAmount(''); setIsAccountOpen(false);
     Alert.alert("Logged Out", "You have been successfully logged out.");
+  };
+
+  const applyReferral = async () => {
+    const code = referralInput.trim().toUpperCase();
+    if (!code || referralApplying) return;
+    setReferralApplying(true); setReferralMessage('');
+    const { error } = await supabase.rpc('apply_referral_code', { p_code: code });
+    setReferralApplying(false);
+    if (error) {
+      if (__DEV__) console.error('Referral code failed', error.message);
+      setReferralMessage('This referral code could not be applied.');
+      return;
+    }
+    setReferralInput(''); setReferralMessage('Referral applied. Complete your first delivered order to unlock the reward.');
+  };
+
+  const copyReferralCode = async () => {
+    if (!referralCode) return;
+    try {
+      if (globalThis.navigator?.clipboard?.writeText) await globalThis.navigator.clipboard.writeText(referralCode);
+      else Alert.alert('Your invite code', referralCode);
+      setReferralMessage('Invite code ready to share.');
+    } catch { Alert.alert('Your invite code', referralCode); }
   };
 
   const toggleFavorite = async (product) => {
@@ -393,11 +437,13 @@ function HomeScreen({ navigation }) {
   };
 
   const itemTotal = cart.reduce((acc, curr) => acc + (curr.item.price * curr.qty), 0);
-  const smallCartCharge = (itemTotal > 0 && itemTotal < 100) ? 20 : 0;
-  const deliveryCharge = (itemTotal > 0 && itemTotal < 200) ? 30 : 0; 
+  const freeDeliveryThreshold = 299;
+  const smallCartCharge = (itemTotal > 0 && itemTotal < 199) ? 29 : 0;
+  const deliveryCharge = (itemTotal > 0 && itemTotal < freeDeliveryThreshold) ? 30 : 0; 
   const donationAmt = isDonating ? 1 : 0;
-  const zeshuDiscount = useZeshuCoins ? Math.min(ZESHU_COINS_VAL, itemTotal) : 0; 
-  const finalTotal = itemTotal > 0 ? (itemTotal + smallCartCharge + deliveryCharge + HANDLING_FEE + donationAmt + tipAmount - zeshuDiscount) : 0;
+  const zeshuCashMax = itemTotal > 0 ? Math.max(0, Math.min(rewardBalance, 20, Math.floor(itemTotal * 0.1))) : 0;
+  const requestedZeshuCash = useZeshuCash ? Math.max(0, Math.min(Number(zeshuCashAmount || zeshuCashMax), zeshuCashMax)) : 0;
+  const finalTotal = itemTotal > 0 ? (itemTotal + smallCartCharge + deliveryCharge + HANDLING_FEE + donationAmt + tipAmount - requestedZeshuCash) : 0;
   const activeOrder = myOrders.find((order) => ACTIVE_ORDER_STATUSES.includes(order?.status));
   const deliveredOrder = myOrders.find((order) => order.status === 'DELIVERED');
   const renderMobileStars = (value, setter, label) => <View accessibilityLabel={label} style={{ flexDirection: 'row', marginTop: 5 }}>{[1, 2, 3, 4, 5].map((star) => <TouchableOpacity key={star} accessibilityRole="button" accessibilityLabel={`${label} ${star} star`} onPress={() => setter(star)}><Text style={{ color: star <= value ? '#f59e0b' : '#cbd5e1', fontSize: 26, marginRight: 2 }}>★</Text></TouchableOpacity>)}</View>;
@@ -425,7 +471,7 @@ function HomeScreen({ navigation }) {
       const { data: { session } } = await supabase.auth.getSession();
       const orderResponse = await fetch(`${BASE_URL}/api/create-razorpay-order`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session?.access_token || ''}` },
-        body: JSON.stringify({ cartItems: cart, deliveryAddress: currentAddress, isDonating, tipAmount, hasZeshuPass: false })
+        body: JSON.stringify({ cartItems: cart, deliveryAddress: currentAddress, isDonating, tipAmount, hasZeshuPass: false, zeshuCashAmount: requestedZeshuCash })
       });
       
       const textRes = await orderResponse.text();
@@ -489,7 +535,10 @@ function HomeScreen({ navigation }) {
         } catch (e) { if (__DEV__) console.error("Backend sync error", e instanceof Error ? e.message : 'unknown error'); Alert.alert('Order not created', 'Payment was verified but we could not create your order. Please contact support.'); return; }
 
         const placedOrder = confirmationData.order || {};
-        Alert.alert('Order placed', `Order #${String(placedOrder.id || orderId).split('-')[0].toUpperCase()}\nAmount paid: ₹${Number(placedOrder.total_paid || (orderData.amount / 100) || 0).toFixed(2)}\nStatus: ${placedOrder.status || 'PENDING'}\nDelivering to: ${placedOrder.delivery_address || currentAddress}`);
+        const cashMessage = Number(confirmationData.zeshuCashUsed || 0) > 0 ? `\n₹${Number(confirmationData.zeshuCashUsed).toFixed(0)} Zeshu Cash used.` : '';
+        const pendingMessage = Number(confirmationData.pendingReward || 0) > 0 ? `\nEarn ₹${Number(confirmationData.pendingReward).toFixed(0)} Zeshu Cash after delivery.` : '';
+        Alert.alert('Order placed', `Order #${String(placedOrder.id || orderId).split('-')[0].toUpperCase()}\nAmount paid: ₹${Number(placedOrder.total_paid || (orderData.amount / 100) || 0).toFixed(2)}\nStatus: ${placedOrder.status || 'PENDING'}${cashMessage}${pendingMessage}\nDelivering to: ${placedOrder.delivery_address || currentAddress}`);
+        if (Number(confirmationData.zeshuCashUsed || 0) > 0) setRewardBalance((current) => Math.max(0, current - Number(confirmationData.zeshuCashUsed)));
         setCart([]); 
         setIsCartOpen(false);
       }).catch((error) => {
@@ -522,10 +571,6 @@ function HomeScreen({ navigation }) {
               setIsScannerOpen(true);
             }}>
               <Ionicons name="qr-code" size={18} color="white" />
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.coinsPill} onPress={() => setIsCoinHistoryOpen(true)}>
-              <FontAwesome5 name="coins" size={12} color="#F59E0B" />
-              <Text style={styles.coinsText}>{coinsBalance}</Text>
             </TouchableOpacity>
             <TouchableOpacity onPress={handleProfileClick} style={styles.userIcon}>
               <Ionicons name="person" size={20} color={isLoggedIn ? PRIMARY_COLOR : "#9CA3AF"} />
@@ -790,14 +835,9 @@ function HomeScreen({ navigation }) {
               </TouchableOpacity>
             </View>
 
-            {itemTotal > 0 && itemTotal < 100 && (
-              <View style={[styles.upsellBanner, {backgroundColor: '#FEF2F2', borderBottomColor: '#FEE2E2'}]}>
-                <Text style={[styles.upsellText, {color: '#EF4444', fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5}]}>Add ₹{100 - itemTotal} more to avoid the ₹20 Small Cart Fee!</Text>
-              </View>
-            )}
-            {itemTotal >= 100 && itemTotal < 200 && (
+            {itemTotal >= 199 && itemTotal < 299 && (
               <View style={[styles.upsellBanner, {backgroundColor: `${PRIMARY_COLOR}15`, borderBottomColor: `${PRIMARY_COLOR}40`}]}>
-                <Text style={[styles.upsellText, {color: PRIMARY_COLOR}]}>Add ₹{200 - itemTotal} more to skip the ₹30 Delivery Charge!</Text>
+                <Text style={[styles.upsellText, {color: PRIMARY_COLOR}]}>Add ₹{299 - itemTotal} more for FREE delivery.</Text>
               </View>
             )}
 
@@ -829,23 +869,23 @@ function HomeScreen({ navigation }) {
                 ))}
               </View>
 
-              {/* Zeshu Coins Toggle */}
-              <View style={[styles.coinsToggle, useZeshuCoins && {backgroundColor: `${PRIMARY_COLOR}10`, borderColor: PRIMARY_COLOR}]}>
+              {smartAddOns.length > 0 && <View style={{ marginBottom: 16 }}><View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}><Text style={{ fontSize: 15, fontWeight: '900', color: TEXT_DARK }}>Complete your basket</Text><Text style={{ fontSize: 10, fontWeight: '800', color: TEXT_MUTED }}>Current stock only</Text></View><ScrollView horizontal showsHorizontalScrollIndicator={false}>{smartAddOns.map((product) => <View key={product.id} style={{ width: 132, marginRight: 10, padding: 10, borderRadius: 12, borderWidth: 1, borderColor: '#e5e7eb', backgroundColor: '#fff' }}><Image source={{ uri: product.image_url }} style={{ width: '100%', height: 62 }} resizeMode="contain" /><Text style={{ marginTop: 5, fontSize: 11, fontWeight: '700', color: TEXT_DARK }} numberOfLines={2}>{product.name}</Text><View style={{ marginTop: 7, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}><Text style={{ fontSize: 12, fontWeight: '900', color: TEXT_DARK }}>₹{product.price}</Text><TouchableOpacity onPress={() => addToCart(product)} style={{ paddingHorizontal: 8, paddingVertical: 5, borderRadius: 7, backgroundColor: '#e9f7ef' }}><Text style={{ fontSize: 10, fontWeight: '900', color: '#075b36' }}>ADD</Text></TouchableOpacity></View></View>)}</ScrollView></View>}
+
+              {rewardBalance > 0 && <View style={[styles.coinsToggle, { backgroundColor: '#eef8f1', borderColor: '#cfe8d7' }]}> 
                 <Image source={{ uri: ZESHU_LOGO_URL }} style={{width: 32, height: 32, borderRadius: 8}} />
                 <View style={{ flex: 1, marginLeft: 15 }}>
-                  <Text style={[styles.toggleTitle, { color: TEXT_DARK }]}>Zeshu Coins Balance: {coinsBalance}</Text>
-                  <Text style={[styles.toggleSub, { color: TEXT_MUTED }]}>You can save ₹{Math.min(ZESHU_COINS_VAL, itemTotal)}</Text>
+                  <Text style={[styles.toggleTitle, { color: PRIMARY_COLOR }]}>Zeshu Cash · Available ₹{rewardBalance.toFixed(2)}</Text>
+                  <Text style={[styles.toggleSub, { color: TEXT_MUTED }]}>₹1 Zeshu Cash = ₹1. Final payable stays at least ₹1.</Text>
                 </View>
-                <TouchableOpacity onPress={() => setUseZeshuCoins(!useZeshuCoins)} style={{backgroundColor: useZeshuCoins ? '#FEE2E2' : `${PRIMARY_COLOR}15`, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 8}}>
-                  <Text style={{fontWeight: 'bold', color: useZeshuCoins ? '#DC2626' : PRIMARY_COLOR}}>{useZeshuCoins ? 'REMOVE' : 'APPLY'}</Text>
-                </TouchableOpacity>
-              </View>
+                <TouchableOpacity disabled={itemTotal <= 0 || zeshuCashMax < 1} onPress={() => { setUseZeshuCash((current) => !current); if (!useZeshuCash) setZeshuCashAmount(String(zeshuCashMax)); }} style={{ backgroundColor: useZeshuCash ? PRIMARY_COLOR : '#fff', paddingHorizontal: 10, paddingVertical: 8, borderRadius: 8, opacity: itemTotal <= 0 || zeshuCashMax < 1 ? 0.5 : 1 }}><Text style={{ fontWeight: '900', fontSize: 10, color: useZeshuCash ? '#fff' : PRIMARY_COLOR }}>{useZeshuCash ? 'REMOVE' : 'USE'}</Text></TouchableOpacity>
+              </View>}
 
               <Text style={styles.shipmentText}>Bill details</Text>
               <View style={styles.whiteBox}>
-                <View style={styles.billRow}><Text style={styles.billLabel}>Items total</Text><Text style={styles.billVal}>₹{itemTotal}</Text></View>
-                {useZeshuCoins && <View style={styles.billRow}><Text style={[styles.billLabel, {color: PRIMARY_COLOR}]}>Zeshu Coins</Text><Text style={[styles.billVal, {color: PRIMARY_COLOR}]}>-₹{zeshuDiscount}</Text></View>}
+                {itemTotal > 0 && <View style={{ marginBottom: 12, borderRadius: 12, backgroundColor: '#f0fdf4', padding: 10 }}><View style={{ flexDirection: 'row', justifyContent: 'space-between' }}><Text style={{ fontSize: 11, fontWeight: '900', color: '#166534' }}>{itemTotal >= freeDeliveryThreshold ? 'You\'ve unlocked FREE delivery 🎉' : `Add ₹${freeDeliveryThreshold - itemTotal} more for FREE delivery`}</Text><Text style={{ fontSize: 10, fontWeight: '900', color: '#166534' }}>{Math.min(100, Math.round((itemTotal / freeDeliveryThreshold) * 100))}%</Text></View><View style={{ height: 7, marginTop: 6, overflow: 'hidden', borderRadius: 4, backgroundColor: '#dcfce7' }}><View style={{ width: `${Math.min(100, (itemTotal / freeDeliveryThreshold) * 100)}%`, height: '100%', borderRadius: 4, backgroundColor: PRIMARY_COLOR }} /></View>{itemTotal < freeDeliveryThreshold && itemTotal < 199 && <Text style={{ marginTop: 6, fontSize: 10, fontWeight: '700', color: '#15803d' }}>Add a few more essentials and save on delivery.</Text>}</View>}
+                <View style={styles.billRow}><Text style={styles.billLabel}>Subtotal</Text><Text style={styles.billVal}>₹{itemTotal}</Text></View>
                 <View style={styles.billRow}><Text style={styles.billLabel}>Delivery charge</Text><Text style={[styles.billVal, deliveryCharge===0 && {color: PRIMARY_COLOR}]}>{deliveryCharge === 0 ? 'FREE' : `₹${deliveryCharge}`}</Text></View>
+                {requestedZeshuCash > 0 && <View style={styles.billRow}><Text style={[styles.billLabel, { color: PRIMARY_COLOR }]}>Zeshu Cash</Text><Text style={[styles.billVal, { color: PRIMARY_COLOR }]}>-₹{requestedZeshuCash}</Text></View>}
                 <View style={styles.billRow}><Text style={styles.billLabel}>Handling charge</Text><Text style={styles.billVal}>₹{HANDLING_FEE}</Text></View>
                 {smallCartCharge > 0 && <View style={styles.billRow}><Text style={[styles.billLabel, {color: '#EF4444'}]}>Small cart charge</Text><Text style={[styles.billVal, {color: '#EF4444'}]}>₹{smallCartCharge}</Text></View>}
                 
@@ -952,20 +992,6 @@ function HomeScreen({ navigation }) {
         </View>
       </Modal>
 
-      {/* COIN HISTORY MODAL */}
-      <Modal visible={isCoinHistoryOpen} animationType="fade" transparent={true}>
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalContent, {height: '60%'}]}>
-            <View style={styles.modalHeader}><Text style={styles.modalTitle}>Zeshu Coin History</Text><TouchableOpacity onPress={() => setIsCoinHistoryOpen(false)}><Ionicons name="close" size={24} color="#333" /></TouchableOpacity></View>
-            <ScrollView style={{padding: 20}}>
-              <View style={{backgroundColor: '#FFFBEB', padding: 16, borderRadius: 12, borderWidth: 1, borderColor: '#FDE68A', marginBottom: 20}}><Text style={{color: '#B45309', fontWeight: 'bold', fontSize: 14, textAlign: 'center'}}>Zeshu coins can be used for recharge and bill payment!</Text></View>
-              <Text style={{fontWeight: 'bold', marginBottom: 15}}>Recent Transactions</Text>
-              <View style={{flexDirection: 'row', justifyContent: 'space-between', borderBottomWidth: 1, borderBottomColor: '#eee', paddingVertical: 12}}><View><Text style={{fontWeight: 'bold'}}>Airtel Prepaid</Text><Text style={{fontSize: 12, color: TEXT_MUTED}}>Cashback Earned</Text></View><Text style={{color: '#059669', fontWeight: 'bold'}}>+12 Coins</Text></View>
-            </ScrollView>
-          </View>
-        </View>
-      </Modal>
-
       {/* ACCOUNT MODAL */}
       <Modal visible={isAccountOpen} animationType="slide" transparent={true}>
         <View style={styles.modalOverlay}>
@@ -981,6 +1007,17 @@ function HomeScreen({ navigation }) {
                   <Ionicons name="chevron-forward" size={20} color={TEXT_MUTED} />
                 </TouchableOpacity>
               ))}
+
+              <View style={{ marginTop: 16, padding: 16, borderRadius: 16, backgroundColor: '#eef8f1', borderWidth: 1, borderColor: '#cfe8d7' }}>
+                <Text style={{ fontSize: 11, fontWeight: '900', color: PRIMARY_COLOR, letterSpacing: 1 }}>ZESHU CASH</Text>
+                <Text style={{ marginTop: 4, fontSize: 26, fontWeight: '900', color: TEXT_DARK }}>₹{rewardBalance.toFixed(2)}</Text>
+                <Text style={{ marginTop: 3, fontSize: 11, color: TEXT_MUTED }}>Earn rewards on eligible delivered orders. Redemption is coming soon.</Text>
+                <Text style={{ marginTop: 10, fontSize: 11, fontWeight: '800', color: PRIMARY_COLOR }}>{myOrders.filter((order) => order.status === 'DELIVERED' && new Date(order.created_at || 0).getMonth() === new Date().getMonth() && new Date(order.created_at || 0).getFullYear() === new Date().getFullYear()).length < 3 ? `Complete ${3 - myOrders.filter((order) => order.status === 'DELIVERED' && new Date(order.created_at || 0).getMonth() === new Date().getMonth() && new Date(order.created_at || 0).getFullYear() === new Date().getFullYear()).length} more delivered order(s) for the monthly ₹5 bonus.` : 'Monthly milestone progress is on track.'}</Text>
+                {referralCode && <TouchableOpacity onPress={() => void copyReferralCode()} style={{ marginTop: 12, padding: 10, borderRadius: 9, backgroundColor: '#fff' }}><Text style={{ fontSize: 11, fontWeight: '900', color: PRIMARY_COLOR }}>Copy invite code: {referralCode}</Text></TouchableOpacity>}
+                <View style={{ marginTop: 10, flexDirection: 'row', gap: 8 }}><TextInput value={referralInput} onChangeText={setReferralInput} placeholder="Have a referral code?" autoCapitalize="characters" style={{ flex: 1, borderWidth: 1, borderColor: '#dbe5df', borderRadius: 9, paddingHorizontal: 10, paddingVertical: 8, backgroundColor: '#fff', fontSize: 12 }} /><TouchableOpacity disabled={referralApplying} onPress={() => void applyReferral()} style={{ paddingHorizontal: 12, justifyContent: 'center', borderRadius: 9, backgroundColor: PRIMARY_COLOR, opacity: referralApplying ? 0.6 : 1 }}><Text style={{ color: '#fff', fontSize: 11, fontWeight: '900' }}>APPLY</Text></TouchableOpacity></View>
+                {!!referralMessage && <Text style={{ marginTop: 8, fontSize: 11, color: TEXT_MUTED }}>{referralMessage}</Text>}
+                {rewardHistory.slice(0, 3).map((entry, index) => <View key={`${entry.reference_key || entry.event_type}-${index}`} style={{ marginTop: 9, flexDirection: 'row', justifyContent: 'space-between' }}><Text style={{ flex: 1, fontSize: 11, color: TEXT_MUTED }}>{entry.description || entry.event_type}</Text><Text style={{ fontSize: 11, fontWeight: '900', color: PRIMARY_COLOR }}>+₹{Number(entry.amount || 0).toFixed(2)}</Text></View>)}
+              </View>
               
               <View style={styles.promoBanner}>
                 <View style={{flex: 1}}>
@@ -1209,7 +1246,7 @@ function RechargeScreen({ route, navigation }) {
         })
       });
         
-      Alert.alert('Payment Successful!', `🎉 You earned ₹${cashbackEarned} Cashback in Zeshu Coins!`); 
+      Alert.alert('Payment Successful!', 'Your utility payment was completed successfully.'); 
       navigation.goBack(); 
 
     } catch (error) {
