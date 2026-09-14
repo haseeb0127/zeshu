@@ -1,56 +1,105 @@
 import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, Alert, ActivityIndicator, Linking, ScrollView } from 'react-native';
+import { View, Text, TouchableOpacity, Alert, ActivityIndicator, Linking, ScrollView, Platform } from 'react-native';
 import { supabase } from './supabase';
 import { MapPin, Phone, Navigation, CheckCircle2, ChevronLeft, ShoppingBag } from 'lucide-react-native';
 
 export default function ActiveOrderScreen({ route, navigation }: any) {
-  const { order } = route.params;
+  const { order, riderId } = route.params;
   const [loading, setLoading] = useState(false);
+  const [status, setStatus] = useState(order.status || 'PENDING');
+  const hasDeliveryAddress = typeof order.delivery_address === 'string' && order.delivery_address.trim().length > 0;
+  let items: any[] = [];
+  try { items = typeof order.items === 'string' ? JSON.parse(order.items) : order.items || []; } catch { items = []; }
+
+  const debugLog = (...details: unknown[]) => {
+    if (typeof __DEV__ !== 'undefined' && __DEV__) console.log('[Rider delivery]', ...details);
+  };
+
+  const debugError = (...details: unknown[]) => {
+    if (typeof __DEV__ !== 'undefined' && __DEV__) console.error('[Rider delivery]', ...details);
+  };
 
   // 🗺️ 1. Open Google Maps (FIXED URL)
   const openMaps = () => {
-    const mapUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(order.delivery_address)}`;
+    if (!hasDeliveryAddress) return;
+    const address = encodeURIComponent(order.delivery_address.trim());
+    const mapUrl = Platform.OS === 'web'
+      ? `https://www.google.com/maps/search/?api=1&query=${address}`
+      : Platform.OS === 'ios'
+        ? `https://maps.apple.com/?q=${address}`
+        : `geo:0,0?q=${address}`;
     Linking.openURL(mapUrl).catch(() => Alert.alert('Error', 'Could not open Google Maps'));
   };
 
-  // 📞 2. Call the Customer
-  const callCustomer = () => {
-    const phoneNumber = '+919876543210'; // Placeholder
-    Linking.openURL(`tel:${phoneNumber}`);
-  };
-
   // ✅ 3. Mark as Delivered
-  const markAsDelivered = async () => {
-    Alert.alert(
-      "Confirm Delivery",
-      "Are you sure you have handed the items to the customer?",
-      [
-        { text: "Cancel", style: "cancel" },
-        { 
-          text: "Yes, Delivered!", 
-          onPress: async () => {
-            setLoading(true);
-            
-            // This updates the status to DELIVERED
-            // This will trigger the real-time listener on your Dashboard!
-            const { error } = await supabase
-              .from('orders')
-              .update({ status: 'DELIVERED' })
-              .eq('id', order.id);
+  const advanceOrderStatus = async (nextStatus: 'PICKED_UP' | 'OUT_FOR_DELIVERY' | 'DELIVERED') => {
+    if (loading) return;
+    setLoading(true);
+    try {
+      debugLog('RPC starting', { orderId: order.id, nextStatus });
+      const { data, error } = await supabase.rpc('advance_rider_order_status', {
+        p_order_id: order.id,
+        p_next_status: nextStatus,
+      });
+      debugLog('RPC result', { orderId: order.id, nextStatus, success: !error });
 
-            setLoading(false);
+      if (error) {
+        debugError('Rider order transition failed:', error);
+        Alert.alert('Could not update delivery', 'Please check the current order status and try again.');
+        return;
+      }
 
-            if (error) {
-              Alert.alert('Error', 'Could not update status.');
-            } else {
-              Alert.alert('Success!', 'Great job. You earned ₹30 for this delivery.');
-              navigation.goBack(); 
-            }
-          }
+      const { data: refreshedOrder, error: refreshError } = await supabase
+        .from('orders')
+        .select('id,status')
+        .eq('id', order.id)
+        .eq('rider_id', riderId)
+        .maybeSingle();
+      if (refreshError) debugError('Rider order refresh failed:', refreshError);
+      debugLog('Refresh after success', { orderId: order.id, status: refreshedOrder?.status || data || nextStatus });
+      setStatus(refreshedOrder?.status || data || nextStatus);
+
+      if (nextStatus === 'DELIVERED') {
+        if (Platform.OS === 'web') {
+          const browser = globalThis as typeof globalThis & { alert?: (message: string) => void };
+          browser.alert?.('Delivery complete. The order was marked as delivered.');
+          navigation.goBack();
+        } else {
+          Alert.alert('Delivery complete', 'The order was marked as delivered.', [{ text: 'Done', onPress: () => navigation.goBack() }]);
         }
-      ]
-    );
+      }
+    } catch (error) {
+      debugError('Caught error while advancing rider order:', error);
+      Alert.alert('Could not update delivery', 'Please try again.');
+    } finally {
+      setLoading(false);
+    }
   };
+
+  const confirmCompletion = () => {
+    debugLog('Complete Delivery button pressed', { orderId: order.id });
+
+    if (Platform.OS === 'web') {
+      const browser = globalThis as typeof globalThis & { confirm?: (message: string) => boolean };
+      const confirmed = browser.confirm?.('Have you handed the items to the customer?') ?? false;
+      debugLog(confirmed ? 'Confirmation accepted' : 'Confirmation cancelled', { orderId: order.id });
+      if (confirmed) void advanceOrderStatus('DELIVERED');
+      return;
+    }
+
+    Alert.alert('Confirm delivery', 'Have you handed the items to the customer?', [
+      { text: 'Cancel', style: 'cancel', onPress: () => debugLog('Confirmation cancelled', { orderId: order.id }) },
+      { text: 'Complete delivery', onPress: () => { debugLog('Confirmation accepted', { orderId: order.id }); void advanceOrderStatus('DELIVERED'); } },
+    ]);
+  };
+
+  const nextAction = status === 'READY_FOR_PICKUP'
+    ? { label: 'Confirm Pickup', nextStatus: 'PICKED_UP' as const }
+    : status === 'PICKED_UP'
+      ? { label: 'Start Delivery', nextStatus: 'OUT_FOR_DELIVERY' as const }
+      : status === 'OUT_FOR_DELIVERY'
+        ? { label: 'Complete Delivery', nextStatus: 'DELIVERED' as const }
+        : null;
 
   return (
     <View style={{ flex: 1, backgroundColor: '#f8fafc' }}>
@@ -72,8 +121,8 @@ export default function ActiveOrderScreen({ route, navigation }: any) {
             <Text style={{ fontSize: 18, fontWeight: '900', color: '#0f172a' }}>#{order.id.split('-')[0].toUpperCase()}</Text>
           </View>
           <View style={{ alignItems: 'flex-end' }}>
-             <Text style={{ fontSize: 12, fontWeight: '800', color: '#94a3b8', textTransform: 'uppercase', marginBottom: 4 }}>To Collect</Text>
-             <Text style={{ fontSize: 18, fontWeight: '900', color: '#10b981' }}>PAID ONLINE</Text>
+             <Text style={{ fontSize: 12, fontWeight: '800', color: '#94a3b8', textTransform: 'uppercase', marginBottom: 4 }}>Delivery Status</Text>
+             <Text style={{ fontSize: 14, fontWeight: '900', color: '#087443' }}>{status.replaceAll('_', ' ')}</Text>
           </View>
         </View>
 
@@ -88,14 +137,14 @@ export default function ActiveOrderScreen({ route, navigation }: any) {
           </View>
 
           <View style={{ flexDirection: 'row', gap: 12 }}>
-            <TouchableOpacity onPress={openMaps} style={{ flex: 1, backgroundColor: '#eff6ff', padding: 16, borderRadius: 16, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#bfdbfe' }}>
+            {hasDeliveryAddress ? <TouchableOpacity onPress={openMaps} style={{ flex: 1, backgroundColor: '#eff6ff', padding: 16, borderRadius: 16, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#bfdbfe' }}>
               <Navigation color="#3b82f6" size={20} style={{ marginRight: 8 }} />
               <Text style={{ color: '#3b82f6', fontSize: 14, fontWeight: '900' }}>Navigate</Text>
-            </TouchableOpacity>
+            </TouchableOpacity> : null}
             
-            <TouchableOpacity onPress={callCustomer} style={{ flex: 1, backgroundColor: '#f0fdf4', padding: 16, borderRadius: 16, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#bbf7d0' }}>
+            <TouchableOpacity disabled style={{ flex: hasDeliveryAddress ? 1 : undefined, opacity: 0.55, backgroundColor: '#f0fdf4', padding: 16, borderRadius: 16, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#bbf7d0' }}>
               <Phone color="#16a34a" size={20} style={{ marginRight: 8 }} />
-              <Text style={{ color: '#16a34a', fontSize: 14, fontWeight: '900' }}>Call</Text>
+              <Text style={{ color: '#16a34a', fontSize: 14, fontWeight: '900' }}>Call unavailable</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -107,7 +156,7 @@ export default function ActiveOrderScreen({ route, navigation }: any) {
             <Text style={{ fontSize: 16, fontWeight: '900', color: '#0f172a' }}>Order Items</Text>
           </View>
           
-          {order.items?.map((i: any, idx: number) => (
+          {items.length === 0 ? <Text style={{ color: '#64748b', fontWeight: '700' }}>Item details are unavailable for this order.</Text> : items.map((i: any, idx: number) => (
             <View key={idx} style={{ flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#f1f5f9' }}>
               <View>
                 <Text style={{ fontSize: 16, fontWeight: '700', color: '#334155' }}>{i.qty}x   {i.item.name}</Text>
@@ -122,20 +171,16 @@ export default function ActiveOrderScreen({ route, navigation }: any) {
 
       {/* DELIVERY BUTTON */}
       <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0, padding: 20, backgroundColor: '#fff', borderTopWidth: 1, borderTopColor: '#e2e8f0' }}>
-        <TouchableOpacity 
-          onPress={markAsDelivered}
-          disabled={loading}
-          style={{ backgroundColor: '#10b981', height: 64, borderRadius: 20, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', elevation: 5 }}
-        >
-          {loading ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <>
-              <CheckCircle2 color="#fff" size={24} style={{ marginRight: 12 }} />
-              <Text style={{ color: '#fff', fontSize: 18, fontWeight: '900', textTransform: 'uppercase', letterSpacing: 1 }}>Slide to Deliver</Text>
-            </>
-          )}
-        </TouchableOpacity>
+        {nextAction ? <TouchableOpacity onPress={() => {
+          if (nextAction.nextStatus === 'DELIVERED') {
+            confirmCompletion();
+          } else {
+            debugLog('Lifecycle button pressed', { orderId: order.id, nextStatus: nextAction.nextStatus });
+            void advanceOrderStatus(nextAction.nextStatus);
+          }
+        }} disabled={loading} style={{ opacity: loading ? 0.65 : 1, backgroundColor: '#087443', height: 64, borderRadius: 20, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', elevation: 5 }}>
+          {loading ? <ActivityIndicator color="#fff" /> : <><CheckCircle2 color="#fff" size={24} style={{ marginRight: 12 }} /><Text style={{ color: '#fff', fontSize: 18, fontWeight: '900', textTransform: 'uppercase', letterSpacing: 1 }}>{nextAction.label}</Text></>}
+        </TouchableOpacity> : <View style={{ minHeight: 64, borderRadius: 20, backgroundColor: '#f1f5f9', justifyContent: 'center', alignItems: 'center', paddingHorizontal: 16 }}><Text style={{ color: '#475569', textAlign: 'center', fontWeight: '800' }}>{status === 'DELIVERED' ? 'This delivery is complete.' : 'This order is awaiting the next dispatch status.'}</Text></View>}
       </View>
 
     </View>

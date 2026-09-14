@@ -12,6 +12,14 @@
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Allow Zeshu Rider to access your location while you are online so dispatch can track active deliveries."
+        }
+      ]
+    ],
     "ios": {
       "supportsTablet": true
     },

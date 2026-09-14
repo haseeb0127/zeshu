@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, ScrollView, StyleSheet, Dimensions } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, ScrollView, StyleSheet, Dimensions, Alert } from 'react-native';
 import { Picker } from '@react-native-picker/picker';
 import { 
   Smartphone, PhoneCall, Tv, BadgeCheck, Car, Zap, 
@@ -133,11 +133,11 @@ export default function RechargeScreen() {
           />
 
           {amount !== '' && customerCoinsEarned > 0 && (
-            <Text style={styles.coinText}>🎉 Earn {customerCoinsEarned} Zeshu Coins!</Text>
+          <Text style={styles.coinText}>Coin rewards will appear when this service is available.</Text>
           )}
 
-          <TouchableOpacity style={styles.button}>
-            <Text style={styles.buttonText}>Proceed to Pay</Text>
+          <TouchableOpacity style={styles.button} onPress={() => Alert.alert('Coming soon', 'This service is not connected to a verified provider yet. No payment has been started.')}>
+            <Text style={styles.buttonText}>Service unavailable</Text>
           </TouchableOpacity>
         </View>
       </View>

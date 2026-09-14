@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, ComponentProps } from 'react';
 import { 
   StyleSheet, Text, View, ScrollView, TouchableOpacity, 
   Image, TextInput, Modal, SafeAreaView, StatusBar, Dimensions, Alert, Platform, ActivityIndicator
@@ -14,24 +14,40 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 // Database Connection
 import { supabase } from './supabase'; 
 
+const customerUtilityHeaders = async () => {
+  const { data: { session } } = await supabase.auth.getSession();
+  return session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {};
+};
+
 const BASE_URL = 'https://www.zeshu.in';
 
 const { width, height } = Dimensions.get('window');
-const Stack = createNativeStackNavigator();
+type RootStackParamList = { Home: undefined; Recharge: { service?: string } | undefined };
+type MaterialIconName = ComponentProps<typeof MaterialCommunityIcons>['name'];
+type RechargePlan = { categoryName?: string; amount?: string | number; validity?: string; desc?: string };
+type OperatorResponse = { operator?: string };
+const Stack = createNativeStackNavigator<RootStackParamList>();
 
 // --- MODERN UTILITY THEME ---
-const PRIMARY_COLOR = '#8A2BE2'; 
-const ACCENT_COLOR = '#00FF7F';  
+const PRIMARY_COLOR = '#087443'; 
+const ACCENT_COLOR = '#DFF3E6';  
 const TEXT_DARK = '#111827';
 const TEXT_MUTED = '#6B7280';
 const ZESHU_LOGO_URL = 'https://ui-avatars.com/api/?name=Z&background=8A2BE2&color=fff&rounded=true&bold=true&size=128';
 
-const FALLBACK_PRODUCTS = [
-  { id: 1, name: 'Cadbury Dairy Milk Milkinis Milk Chocolate Bar', price: 36, unit: '34 g', image_url: 'https://m.media-amazon.com/images/I/61+y5S5C-kL.jpg' },
-  { id: 2, name: 'Amul Taaza Toned Fresh Milk', price: 54, unit: '1 l', image_url: 'https://m.media-amazon.com/images/I/61+y5S5C-kL.jpg' },
-  { id: 3, name: 'Aashirvaad Shudh Chakki Atta', price: 215, unit: '5 kg', image_url: 'https://m.media-amazon.com/images/I/71rI1D8O7-L.jpg' },
-  { id: 4, name: 'Fortune Sunlite Refined Oil', price: 145, unit: '1 l', image_url: 'https://m.media-amazon.com/images/I/61KxV+R0rAL.jpg' }
-];
+const parseHistoricalOrderItems = (order) => {
+  if (!Array.isArray(order?.items)) return [];
+  const quantities = new Map();
+  order.items.forEach((entry) => {
+    const productId = String(entry?.item?.id ?? entry?.product_id ?? '');
+    const quantity = Number(entry?.qty ?? entry?.quantity ?? 0);
+    if (productId && Number.isInteger(quantity) && quantity > 0) quantities.set(productId, (quantities.get(productId) || 0) + quantity);
+  });
+  return Array.from(quantities, ([productId, quantity]) => ({ productId, quantity }));
+};
+const ORDER_STATUS_LABELS = { PENDING: 'Order placed', CONFIRMED: 'Confirmed', PREPARING: 'Being prepared', READY_FOR_PICKUP: 'Ready for pickup', PICKED_UP: 'Picked up', OUT_FOR_DELIVERY: 'Out for delivery', DELIVERED: 'Delivered', CANCELLED: 'Cancelled' };
+const ACTIVE_ORDER_STATUSES = ['PENDING', 'CONFIRMED', 'PREPARING', 'READY_FOR_PICKUP', 'PICKED_UP', 'OUT_FOR_DELIVERY'];
+const ORDER_TIMELINE_STATUSES = ['PENDING', 'CONFIRMED', 'PREPARING', 'READY_FOR_PICKUP', 'PICKED_UP', 'OUT_FOR_DELIVERY', 'DELIVERED'];
 
 const PROVIDERS = {
   Mobile: ['Airtel', 'JIO', 'Vodafone', 'BSNL'],
@@ -59,6 +75,7 @@ function HomeScreen({ navigation }) {
 
   const [products, setProducts] = useState([]);
   const [searchQuery, setSearchQuery] = useState(''); 
+  const [selectedCategory, setSelectedCategory] = useState('');
   const [cart, setCart] = useState([]);
   
   const [isLoggedIn, setIsLoggedIn] = useState(false); 
@@ -88,6 +105,25 @@ function HomeScreen({ navigation }) {
   const [permission, requestPermission] = useCameraPermissions();
 
   const [myOrders, setMyOrders] = useState([]);
+  const [recentlyPurchased, setRecentlyPurchased] = useState([]);
+  const [favoriteIds, setFavoriteIds] = useState(new Set());
+  const [favoriteProducts, setFavoriteProducts] = useState([]);
+  const [favoriteBusyId, setFavoriteBusyId] = useState(null);
+  const [frequentCategories, setFrequentCategories] = useState([]);
+  const [savedAddresses, setSavedAddresses] = useState([]);
+  const [mobileReviewOverall, setMobileReviewOverall] = useState(0);
+  const [mobileReviewDelivery, setMobileReviewDelivery] = useState(0);
+  const [mobileReviewStore, setMobileReviewStore] = useState(0);
+  const [mobileReviewComment, setMobileReviewComment] = useState('');
+  const [mobileReviewProductRatings, setMobileReviewProductRatings] = useState({});
+  const [mobileReviewLoading, setMobileReviewLoading] = useState(false);
+  const [mobileReviewMessage, setMobileReviewMessage] = useState('');
+  const [mobileReviewExisting, setMobileReviewExisting] = useState(false);
+  const [mobileReviewProductComments, setMobileReviewProductComments] = useState({});
+  const [mobileProductAggregates, setMobileProductAggregates] = useState({});
+  const [mobilePublicReviewsProduct, setMobilePublicReviewsProduct] = useState(null);
+  const [mobilePublicReviews, setMobilePublicReviews] = useState([]);
+  const [mobilePublicReviewsLoading, setMobilePublicReviewsLoading] = useState(false);
 
   const ZESHU_COINS_VAL = 50;
   const HANDLING_FEE = 5;
@@ -96,7 +132,7 @@ function HomeScreen({ navigation }) {
     const fetchProducts = async () => {
       const { data } = await supabase.from('products').select('*');
       if (data && data.length > 0) setProducts(data);
-      else setProducts(FALLBACK_PRODUCTS);
+      else setProducts([]);
     };
     fetchProducts();
     checkUser();
@@ -118,25 +154,88 @@ function HomeScreen({ navigation }) {
 
   // Real-time Tracker
   useEffect(() => {
-    if (!userId) { setMyOrders([]); return; }
+    if (!userId) { setMyOrders([]); setSavedAddresses([]); return; }
+
+    const loadSavedAddresses = async () => {
+      const { data } = await supabase.from('customer_addresses').select('*').order('is_default', { ascending: false }).order('created_at', { ascending: false });
+      setSavedAddresses(data || []);
+    };
+    loadSavedAddresses();
     
     const fetchOrders = async () => {
-      const { data } = await supabase.from('orders').select('*').eq('user_id', userId).order('created_at', { ascending: false }).limit(1);
+      const { data } = await supabase.from('orders').select('*').eq('user_id', userId).order('created_at', { ascending: false }).limit(20);
       if (data) setMyOrders(data);
     };
     fetchOrders();
 
     const channel = supabase.channel('customer-mobile-tracker')
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'orders', filter: `user_id=eq.${userId}` }, 
-      (payload) => setMyOrders([payload.new]))
+      (payload) => setMyOrders((current) => [payload.new, ...current.filter((order) => order.id !== payload.new?.id)].sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))))
       .subscribe();
 
     return () => { supabase.removeChannel(channel); };
   }, [userId]);
 
-  const filteredProducts = products.filter(p => 
-    p.name.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  useEffect(() => {
+    if (!userId) { setRecentlyPurchased([]); setFrequentCategories([]); return; }
+    const deliveredOrders = myOrders.filter((order) => order.status === 'DELIVERED').slice(0, 12);
+    const productIds = Array.from(new Set(deliveredOrders.flatMap((order) => parseHistoricalOrderItems(order).map((entry) => entry.productId))));
+    if (!productIds.length) { setRecentlyPurchased([]); setFrequentCategories([]); return; }
+    let mounted = true;
+    const loadRecentlyPurchased = async () => {
+      const { data, error } = await supabase.from('products').select('*').in('id', productIds);
+      if (!mounted) return;
+      if (error) { if (__DEV__) console.error('Recently purchased products load failed', error.message); setRecentlyPurchased([]); return; }
+      const byId = new Map((data || []).map((product) => [String(product.id), product]));
+      const seen = new Set();
+      const ordered = [];
+      const categoryCounts = new Map();
+      deliveredOrders.forEach((order) => parseHistoricalOrderItems(order).forEach(({ productId, quantity }) => { const currentProduct = byId.get(productId); if (currentProduct?.category) categoryCounts.set(currentProduct.category, (categoryCounts.get(currentProduct.category) || 0) + quantity); if (!seen.has(productId) && byId.has(productId)) { seen.add(productId); ordered.push(byId.get(productId)); } }));
+      setRecentlyPurchased(ordered.slice(0, 10));
+      setFrequentCategories(Array.from(categoryCounts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([category]) => category));
+    };
+    loadRecentlyPurchased();
+    return () => { mounted = false; };
+  }, [userId, myOrders]);
+
+  useEffect(() => {
+    const ids = products.map((product) => String(product.id)).filter(Boolean);
+    if (!ids.length) return;
+    supabase.rpc('get_product_review_aggregates', { p_product_ids: ids }).then(({ data, error }) => {
+      if (error) { if (__DEV__) console.error('Product review aggregates failed', error.message); return; }
+      const next = {};
+      (data || []).forEach((row) => { next[String(row.product_id)] = row; });
+      setMobileProductAggregates(next);
+    });
+  }, [products]);
+
+  useEffect(() => {
+    if (!userId) { setFavoriteIds(new Set()); setFavoriteProducts([]); return; }
+    let mounted = true;
+    const loadFavorites = async () => {
+      const { data, error } = await supabase.from('customer_favorites').select('product_id,created_at').order('created_at', { ascending: false }).limit(100);
+      if (!mounted) return;
+      if (error) { if (__DEV__) console.error('Favorites load failed', error.message); setFavoriteIds(new Set()); setFavoriteProducts([]); return; }
+      const ids = (data || []).map((entry) => String(entry.product_id));
+      if (!ids.length) { setFavoriteIds(new Set()); setFavoriteProducts([]); return; }
+      const { data: productsData, error: productsError } = await supabase.from('products').select('*').in('id', ids);
+      if (!mounted) return;
+      if (productsError) { if (__DEV__) console.error('Favorite products load failed', productsError.message); setFavoriteProducts([]); return; }
+      const byId = new Map((productsData || []).map((product) => [String(product.id), product]));
+      const liveIds = ids.filter((id) => byId.has(id));
+      setFavoriteIds(new Set(liveIds));
+      setFavoriteProducts(liveIds.map((id) => byId.get(id)).filter(Boolean));
+    };
+    loadFavorites();
+    return () => { mounted = false; };
+  }, [userId]);
+
+  const normalizedSearch = searchQuery.trim().replace(/\s+/g, ' ').toLowerCase();
+  const productCategories = Array.from(new Set(products.map((product) => String(product?.category || '').trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const filteredProducts = products.filter((product) => {
+    const haystack = [product?.name, product?.category, product?.weight, product?.unit].filter(Boolean).join(' ').replace(/\s+/g, ' ').toLowerCase();
+    return (!normalizedSearch || haystack.includes(normalizedSearch)) && (!selectedCategory || String(product?.category || '').trim() === selectedCategory);
+  });
 
   const handleAutoDetectLocation = async () => {
     setIsDetectingLoc(true);
@@ -171,7 +270,7 @@ function HomeScreen({ navigation }) {
     setIsAuthLoading(false);
     
     if (!error) setLoginStep('otp');
-    else Alert.alert("Error", error.message);
+    else Alert.alert("Unable to send OTP", "We could not start OTP delivery. Check the number and try again later.");
   };
 
   const handleVerifyOTP = async () => {
@@ -180,13 +279,13 @@ function HomeScreen({ navigation }) {
     const { data, error } = await supabase.auth.verifyOtp({ phone: `+91${phoneNumber}`, token: otp, type: 'sms' });
     setIsAuthLoading(false);
 
-    if (data.session) {
+    if (data.session && data.user && !error) {
       setUserId(data.session.user.id);
       setIsLoggedIn(true);
       setShowLoginModal(false);
       fetchCoinBalance(data.session.user.id);
     } else {
-      Alert.alert("Error", error?.message || "Invalid OTP");
+      Alert.alert("Incorrect or expired OTP", "Please try again or request a new OTP.");
     }
   };
 
@@ -196,10 +295,73 @@ function HomeScreen({ navigation }) {
     Alert.alert("Logged Out", "You have been successfully logged out.");
   };
 
+  const toggleFavorite = async (product) => {
+    if (!isLoggedIn || !userId) { setShowLoginModal(true); setLoginStep('phone'); return; }
+    const productId = String(product.id);
+    if (favoriteBusyId === productId) return;
+    setFavoriteBusyId(productId);
+    const isFavorite = favoriteIds.has(productId);
+    const { error } = await supabase.rpc(isFavorite ? 'customer_remove_favorite' : 'customer_add_favorite', { p_product_id: product.id });
+    setFavoriteBusyId(null);
+    if (error) { if (__DEV__) console.error('Favorite update failed', error.message); return Alert.alert('Favorites', 'Could not update favorites. Please try again.'); }
+    setFavoriteIds((current) => { const next = new Set(current); if (isFavorite) next.delete(productId); else next.add(productId); return next; });
+    setFavoriteProducts((current) => isFavorite ? current.filter((entry) => String(entry.id) !== productId) : [product, ...current.filter((entry) => String(entry.id) !== productId)].slice(0, 100));
+  };
+
   const addToCart = (product) => {
+    if (product?.in_stock === false || (product?.quantity !== null && Number(product?.quantity) <= 0)) return Alert.alert('Unavailable', 'This product is currently unavailable.');
     const existing = cart.find(c => c.item.id === product.id);
-    if (existing) setCart(cart.map(c => c.item.id === product.id ? { ...c, qty: c.qty + 1 } : c));
-    else setCart([...cart, { item: product, qty: 1 }]);
+    const cartVendorIds = Array.from(new Set(cart.map((entry) => entry.item?.vendor_id).filter(Boolean)));
+    if (product?.vendor_id && cartVendorIds.some((vendorId) => vendorId !== product.vendor_id)) return Alert.alert('One store at a time', 'Checkout supports products from one store at a time.');
+    if (existing && product.quantity !== null && existing.qty >= Number(product.quantity)) return Alert.alert('Quantity limit', 'Maximum available quantity already in your cart.');
+    setCart((current) => { const currentItem = current.find((entry) => entry.item.id === product.id); return currentItem ? current.map(c => c.item.id === product.id ? { ...c, qty: c.qty + 1 } : c) : [...current, { item: product, qty: 1 }]; });
+  };
+
+  const reorderOrder = async (order) => {
+    const items = parseHistoricalOrderItems(order);
+    if (!items.length) return Alert.alert('Buy again', 'The items from this order are unavailable.');
+    const { data, error } = await supabase.from('products').select('*').in('id', items.map((item) => item.productId));
+    if (error) { if (__DEV__) console.error('Buy again load failed', error.message); return Alert.alert('Buy again', 'Could not load current product availability.'); }
+    const byId = new Map((data || []).map((product) => [String(product.id), product]));
+    let added = 0;
+    items.forEach(({ productId, quantity }) => {
+      const product = byId.get(productId);
+      if (!product || product.in_stock === false || (product.quantity !== null && Number(product.quantity) <= 0)) return;
+      const existing = cart.find((entry) => String(entry.item.id) === productId);
+      const nextQuantity = (existing?.qty || 0) + quantity;
+      if (product.quantity !== null && nextQuantity > Number(product.quantity)) return;
+      if (existing) setCart((current) => current.map((entry) => String(entry.item.id) === productId ? { ...entry, qty: nextQuantity } : entry));
+      else setCart((current) => [...current, { item: product, qty: quantity }]);
+      added += 1;
+    });
+    if (added) Alert.alert('Added to cart', 'Current prices and availability were applied.');
+    else Alert.alert('Buy again', 'None of these items are currently available.');
+  };
+
+  const submitMobileReview = async (order) => {
+    if (!order?.id || mobileReviewOverall < 1 || mobileReviewLoading) return;
+    setMobileReviewLoading(true); setMobileReviewMessage('');
+    try {
+      const { error } = await supabase.rpc('customer_submit_order_review', { p_order_id: order.id, p_overall_rating: mobileReviewOverall, p_delivery_rating: mobileReviewDelivery || null, p_store_rating: mobileReviewStore || null, p_comment: mobileReviewComment.trim() || null });
+      if (error) throw error;
+      for (const [productId, rating] of Object.entries(mobileReviewProductRatings)) {
+        if (Number(rating) > 0) {
+          const { error: productError } = await supabase.rpc('customer_submit_product_review', { p_order_id: order.id, p_product_id: productId, p_rating: Number(rating), p_comment: String(mobileReviewProductComments[productId] || '').trim() || null });
+          if (productError) throw productError;
+        }
+      }
+      setMobileReviewMessage('Verified review saved.');
+    } catch (error) {
+      if (__DEV__) console.error('Review submission failed', error?.message || error);
+      setMobileReviewMessage('Could not save review. Please try again.');
+    } finally { setMobileReviewLoading(false); }
+  };
+
+  const openMobilePublicReviews = async (product) => {
+    setMobilePublicReviewsProduct(product); setMobilePublicReviews([]); setMobilePublicReviewsLoading(true);
+    const { data, error } = await supabase.rpc('get_public_product_reviews', { p_product_id: product.id, p_limit: 20, p_offset: 0 });
+    if (error && __DEV__) console.error('Public reviews load failed', error.message);
+    setMobilePublicReviews(data || []); setMobilePublicReviewsLoading(false);
   };
 
   const removeFromCart = (productId) => {
@@ -236,8 +398,23 @@ function HomeScreen({ navigation }) {
   const donationAmt = isDonating ? 1 : 0;
   const zeshuDiscount = useZeshuCoins ? Math.min(ZESHU_COINS_VAL, itemTotal) : 0; 
   const finalTotal = itemTotal > 0 ? (itemTotal + smallCartCharge + deliveryCharge + HANDLING_FEE + donationAmt + tipAmount - zeshuDiscount) : 0;
+  const activeOrder = myOrders.find((order) => ACTIVE_ORDER_STATUSES.includes(order?.status));
+  const deliveredOrder = myOrders.find((order) => order.status === 'DELIVERED');
+  const renderMobileStars = (value, setter, label) => <View accessibilityLabel={label} style={{ flexDirection: 'row', marginTop: 5 }}>{[1, 2, 3, 4, 5].map((star) => <TouchableOpacity key={star} accessibilityRole="button" accessibilityLabel={`${label} ${star} star`} onPress={() => setter(star)}><Text style={{ color: star <= value ? '#f59e0b' : '#cbd5e1', fontSize: 26, marginRight: 2 }}>★</Text></TouchableOpacity>)}</View>;
 
-  // 🚀 HARDENED RAZORPAY CHECKOUT
+  useEffect(() => {
+    if (!deliveredOrder?.id || !userId) return;
+    supabase.from('order_reviews').select('overall_rating,delivery_rating,store_rating,comment').eq('order_id', deliveredOrder.id).maybeSingle().then(({ data }) => {
+      if (data) { setMobileReviewExisting(true); setMobileReviewOverall(Number(data.overall_rating) || 0); setMobileReviewDelivery(Number(data.delivery_rating) || 0); setMobileReviewStore(Number(data.store_rating) || 0); setMobileReviewComment(data.comment || ''); }
+    });
+    supabase.from('product_reviews').select('product_id,rating,comment').eq('order_id', deliveredOrder.id).then(({ data }) => {
+      const ratings = {}; const comments = {};
+      (data || []).forEach((review) => { ratings[String(review.product_id)] = Number(review.rating) || 0; comments[String(review.product_id)] = review.comment || ''; });
+      setMobileReviewProductRatings(ratings); setMobileReviewProductComments(comments);
+    });
+  }, [deliveredOrder?.id, userId]);
+
+  // 🚀 GROCERY CHECKOUT
   const handleCheckout = async () => {
     if (finalTotal === 0) return;
     if (!isLoggedIn || !userId) { setIsCartOpen(false); handleProfileClick(); return; }
@@ -245,24 +422,26 @@ function HomeScreen({ navigation }) {
     setIsCheckingOut(true);
     
     try {
+      const { data: { session } } = await supabase.auth.getSession();
       const orderResponse = await fetch(`${BASE_URL}/api/create-razorpay-order`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amount: finalTotal })
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session?.access_token || ''}` },
+        body: JSON.stringify({ cartItems: cart, deliveryAddress: currentAddress, isDonating, tipAmount, hasZeshuPass: false })
       });
       
       const textRes = await orderResponse.text();
       let orderData;
       try { orderData = JSON.parse(textRes); } catch(e) { Alert.alert('Server Error', `Invalid response from backend.`); setIsCheckingOut(false); return; }
 
-      const orderId = orderData.id || (orderData.order && orderData.order.id);
+      if (!orderResponse.ok || !orderData.success) { const raw = String(orderData.error || '').toLowerCase(); const message = raw.includes('price') ? 'A product price changed. Review your cart and try again.' : raw.includes('stock') || raw.includes('quantity') || raw.includes('unavailable') ? 'One or more products are no longer available in that quantity.' : raw.includes('session') || raw.includes('auth') ? 'Your customer session has expired. Please sign in again.' : 'Could not prepare secure checkout. Please review your cart and try again.'; Alert.alert('Checkout unavailable', message); setIsCheckingOut(false); return; }
+      const orderId = orderData.orderId || orderData.id || (orderData.order && orderData.order.id);
       if (!orderId) { Alert.alert('Checkout Error', `Could not fetch Order ID.`); setIsCheckingOut(false); return; }
 
       var options = {
         description: 'Zeshu Super App Groceries',
         image: ZESHU_LOGO_URL,
         currency: orderData.currency || (orderData.order && orderData.order.currency) || 'INR',
-        key: process.env.EXPO_PUBLIC_RAZORPAY_KEY_ID || 'rzp_test_SZhZ5NLWfFtlJZ', // Safe fallback
-        amount: orderData.amount || (orderData.order && orderData.order.amount) || (finalTotal * 100),
+        key: process.env.EXPO_PUBLIC_RAZORPAY_KEY_ID, // Using actual .env key
+        amount: orderData.amount || (orderData.order && orderData.order.amount),
         order_id: orderId, 
         name: 'ZESHU SUPER APP',
         prefill: { email: 'customer@zeshu.in', contact: '9999999999', name: 'Zeshu User' },
@@ -270,24 +449,51 @@ function HomeScreen({ navigation }) {
       };
 
       RazorpayCheckout.open(options).then(async (data) => {
+        let confirmationData;
         try {
-          await fetch(`${BASE_URL}/api/confirm-grocery-order`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
+          // VERIFICATION STEP
+          const verificationResponse = await fetch(`${BASE_URL}/api/verify-razorpay-payment`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              userId: userId,
-              cartItems: cart,
-              totalAmount: finalTotal,
-              paymentId: data.razorpay_payment_id,
-              address: currentAddress
+              razorpay_order_id: data.razorpay_order_id,
+              razorpay_payment_id: data.razorpay_payment_id,
+              razorpay_signature: data.razorpay_signature,
+            }),
+          });
+          
+          const verificationData = await verificationResponse.json();
+          if (!verificationResponse.ok || !verificationData.success) {
+            Alert.alert("Payment Verification Failed", "Could not verify payment securely.");
+            return;
+          }
+
+          // ORDER CONFIRMATION STEP
+          const { data: { session } } = await supabase.auth.getSession();
+          const confirmationResponse = await fetch(`${BASE_URL}/api/confirm-grocery-order`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session?.access_token || ''}` },
+            body: JSON.stringify({
+              reservationId: orderData.reservationId,
+              razorpay_payment_id: data.razorpay_payment_id,
+              razorpay_order_id: data.razorpay_order_id,
+              razorpay_signature: data.razorpay_signature,
             })
           });
-        } catch (e) { console.log("Backend sync error", e); }
+          confirmationData = await confirmationResponse.json();
+          if (!confirmationResponse.ok || !confirmationData.success) {
+            const raw = String(confirmationData.error || '').toLowerCase();
+            const message = raw.includes('stock') || raw.includes('quantity') || raw.includes('unavailable') ? 'Stock changed before confirmation. Your cart was kept available.' : raw.includes('price') ? 'A product price changed before confirmation. Your cart was kept available.' : 'Payment was verified, but order confirmation is still pending. Please do not pay again.';
+            Alert.alert('Order confirmation pending', message);
+            return;
+          }
+        } catch (e) { if (__DEV__) console.error("Backend sync error", e instanceof Error ? e.message : 'unknown error'); Alert.alert('Order not created', 'Payment was verified but we could not create your order. Please contact support.'); return; }
 
-        Alert.alert('Payment Successful!', `Your groceries are being packed!`);
+        const placedOrder = confirmationData.order || {};
+        Alert.alert('Order placed', `Order #${String(placedOrder.id || orderId).split('-')[0].toUpperCase()}\nAmount paid: ₹${Number(placedOrder.total_paid || (orderData.amount / 100) || 0).toFixed(2)}\nStatus: ${placedOrder.status || 'PENDING'}\nDelivering to: ${placedOrder.delivery_address || currentAddress}`);
         setCart([]); 
         setIsCartOpen(false);
       }).catch((error) => {
-        Alert.alert('Payment Failed', error.description || error.error?.description || 'Checkout was cancelled.');
+        Alert.alert('Payment Failed', error.description || error.error?.description || 'Checkout could not be completed.');
       });
     } catch (err) {
       Alert.alert('Network Error', 'Could not reach Zeshu servers.');
@@ -329,7 +535,7 @@ function HomeScreen({ navigation }) {
 
         <View style={styles.locationContainer}>
           <TouchableOpacity style={styles.locationBox}>
-            <Text style={styles.deliveryText}>Delivery in 20 minutes</Text>
+              <Text style={styles.deliveryText}>Delivering to</Text>
             <View style={{flexDirection: 'row', alignItems: 'center'}}>
               <Text style={styles.addressText} numberOfLines={1}>{currentAddress}</Text>
               <Ionicons name="chevron-down" size={14} color={TEXT_MUTED} style={{marginLeft: 4}}/>
@@ -344,54 +550,44 @@ function HomeScreen({ navigation }) {
           <Ionicons name="search" size={20} color={TEXT_MUTED} />
           <TextInput 
             style={styles.searchInput} 
-            placeholder="Search 'milk' or 'recharge'..." 
+          placeholder="Search products" 
             placeholderTextColor="#9CA3AF" 
             value={searchQuery}
             onChangeText={setSearchQuery}
           />
-          <TouchableOpacity><Ionicons name="mic" size={22} color={PRIMARY_COLOR} /></TouchableOpacity>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel={searchQuery ? 'Clear search' : 'Voice search'} onPress={() => searchQuery && setSearchQuery('')}><Ionicons name={searchQuery ? 'close-circle' : 'mic'} size={22} color={PRIMARY_COLOR} /></TouchableOpacity>
         </View>
       </View>
 
       <ScrollView ref={scrollViewRef} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 150 }}>
         
-        {/* LIVE ORDER TRACKER */}
-        {myOrders.length > 0 && myOrders[0].status !== 'DELIVERED' && (
-          <View style={{ backgroundColor: '#fff', padding: 20, margin: 16, borderRadius: 24, borderWidth: 1, borderColor: '#e9d5ff', elevation: 4 }}>
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 16 }}>
-              <Text style={{ fontSize: 14, fontWeight: '900', color: PRIMARY_COLOR, textTransform: 'uppercase' }}>Live Tracking</Text>
-              <View style={{ backgroundColor: '#f3e8ff', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 }}><Text style={{ fontSize: 10, fontWeight: '900', color: PRIMARY_COLOR }}>#{myOrders[0].id.split('-')[0].toUpperCase()}</Text></View>
-            </View>
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-              <View style={{ width: '100%', height: 4, backgroundColor: '#f1f5f9', position: 'absolute', top: 20, zIndex: 0 }} />
-              <View style={{ alignItems: 'center', zIndex: 1 }}>
-                <View style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: PRIMARY_COLOR, justifyContent: 'center', alignItems: 'center' }}><Ionicons name="time" size={16} color="#fff"/></View>
-                <Text style={{ fontSize: 10, fontWeight: '800', marginTop: 8, color: '#64748b' }}>PACKING</Text>
-              </View>
-              <View style={{ alignItems: 'center', zIndex: 1 }}>
-                <View style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: myOrders[0].status === 'OUT_FOR_DELIVERY' ? PRIMARY_COLOR : '#fff', borderWidth: 2, borderColor: myOrders[0].status === 'OUT_FOR_DELIVERY' ? PRIMARY_COLOR : '#e2e8f0', justifyContent: 'center', alignItems: 'center' }}><Ionicons name="car" size={16} color={myOrders[0].status === 'OUT_FOR_DELIVERY' ? '#fff' : '#94a3b8'}/></View>
-                <Text style={{ fontSize: 10, fontWeight: '800', marginTop: 8, color: '#64748b' }}>ON THE WAY</Text>
-              </View>
-              <View style={{ alignItems: 'center', zIndex: 1 }}>
-                <View style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: '#fff', borderWidth: 2, borderColor: '#e2e8f0', justifyContent: 'center', alignItems: 'center' }}><Ionicons name="checkmark-circle" size={16} color="#94a3b8"/></View>
-                <Text style={{ fontSize: 10, fontWeight: '800', marginTop: 8, color: '#64748b' }}>ARRIVED</Text>
-              </View>
-            </View>
-          </View>
-        )}
+        {/* LIVE ORDER TRACKER — uses only the real order status */}
+        {activeOrder && <View style={{ backgroundColor: '#fff', padding: 20, margin: 16, borderRadius: 24, borderWidth: 1, borderColor: '#cfe8d7', elevation: 4 }}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 12 }}><View><Text style={{ fontSize: 14, fontWeight: '900', color: PRIMARY_COLOR, textTransform: 'uppercase' }}>Your active order</Text><Text style={{ marginTop: 3, fontSize: 16, fontWeight: '900', color: TEXT_DARK }}>{ORDER_STATUS_LABELS[activeOrder.status] || 'Order in progress'}</Text></View><View style={{ backgroundColor: '#eef8f1', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 }}><Text style={{ fontSize: 10, fontWeight: '900', color: PRIMARY_COLOR }}>#{activeOrder.id.split('-')[0].toUpperCase()}</Text></View></View>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 8 }} contentContainerStyle={{ flexGrow: 1, justifyContent: 'space-between' }}>{ORDER_TIMELINE_STATUSES.map((step) => { const orderIndex = ORDER_TIMELINE_STATUSES.indexOf(activeOrder.status); const stepIndex = ORDER_TIMELINE_STATUSES.indexOf(step); const complete = stepIndex <= orderIndex; return <View key={step} style={{ alignItems: 'center', width: 76 }}><View style={{ width: 30, height: 30, borderRadius: 15, backgroundColor: complete ? PRIMARY_COLOR : '#fff', borderWidth: 2, borderColor: complete ? PRIMARY_COLOR : '#dbe5df', justifyContent: 'center', alignItems: 'center' }}><Ionicons name={complete ? 'checkmark' : 'ellipse-outline'} size={14} color={complete ? '#fff' : '#94a3b8'} /></View><Text numberOfLines={2} style={{ marginTop: 6, textAlign: 'center', fontSize: 9, fontWeight: '800', color: complete ? PRIMARY_COLOR : '#64748b' }}>{ORDER_STATUS_LABELS[step]}</Text></View>; })}</ScrollView>
+          {activeOrder.delivery_address && <Text numberOfLines={2} style={{ marginTop: 12, fontSize: 11, color: TEXT_MUTED }}>Delivering to: {activeOrder.delivery_address}</Text>}
+        </View>}
+        {!activeOrder && myOrders.find((order) => order.status === 'DELIVERED') && <View style={{ backgroundColor: '#fff', padding: 18, margin: 16, borderRadius: 22, borderWidth: 1, borderColor: '#dbe5df' }}><Text style={{ fontSize: 14, fontWeight: '900', color: TEXT_DARK }}>Your last order was delivered</Text><Text style={{ marginTop: 4, fontSize: 12, color: TEXT_MUTED }}>Order #{myOrders.find((order) => order.status === 'DELIVERED').id.split('-')[0].toUpperCase()} · ₹{Number(myOrders.find((order) => order.status === 'DELIVERED').total_paid || 0).toFixed(0)}</Text><View style={{ flexDirection: 'row', gap: 8, marginTop: 12 }}><TouchableOpacity onPress={() => reorderOrder(myOrders.find((order) => order.status === 'DELIVERED'))} style={{ borderRadius: 10, backgroundColor: PRIMARY_COLOR, paddingHorizontal: 14, paddingVertical: 10 }}><Text style={{ color: '#fff', fontWeight: '900', fontSize: 12 }}>Buy again</Text></TouchableOpacity><TouchableOpacity onPress={() => Alert.alert('Delivered order', myOrders.find((order) => order.status === 'DELIVERED').delivery_address || 'Delivery address unavailable.')} style={{ borderRadius: 10, borderWidth: 1, borderColor: PRIMARY_COLOR, paddingHorizontal: 14, paddingVertical: 10 }}><Text style={{ color: PRIMARY_COLOR, fontWeight: '900', fontSize: 12 }}>View details</Text></TouchableOpacity></View></View>}
+        {!activeOrder && deliveredOrder && <View style={{ backgroundColor: '#fffbeb', padding: 18, marginHorizontal: 16, marginBottom: 16, borderRadius: 22, borderWidth: 1, borderColor: '#fde68a' }}><Text style={{ fontSize: 16, fontWeight: '900', color: TEXT_DARK }}>{mobileReviewExisting ? 'Edit your review' : 'Rate your order'}</Text><Text style={{ marginTop: 4, fontSize: 12, color: TEXT_MUTED }}>{mobileReviewExisting ? 'You rated this order before.' : 'Verified purchase'} · Order #{deliveredOrder.id.split('-')[0].toUpperCase()}</Text><Text style={{ marginTop: 12, fontSize: 12, fontWeight: '900', color: TEXT_DARK }}>Overall experience</Text>{renderMobileStars(mobileReviewOverall, setMobileReviewOverall, 'Overall experience')}<Text style={{ marginTop: 10, fontSize: 12, fontWeight: '900', color: TEXT_DARK }}>Store experience</Text>{renderMobileStars(mobileReviewStore, setMobileReviewStore, 'Store experience')}<Text style={{ marginTop: 10, fontSize: 12, fontWeight: '900', color: TEXT_DARK }}>Delivery experience</Text>{renderMobileStars(mobileReviewDelivery, setMobileReviewDelivery, 'Delivery experience')}<TextInput value={mobileReviewComment} onChangeText={(text) => setMobileReviewComment(text.slice(0, 1000))} placeholder="Optional comment (plain text)" multiline style={{ marginTop: 12, minHeight: 60, borderWidth: 1, borderColor: '#f1d58a', borderRadius: 12, backgroundColor: '#fff', padding: 10, textAlignVertical: 'top' }} />{parseHistoricalOrderItems(deliveredOrder).map(({ productId }) => { const product = products.find((item) => String(item.id) === productId); return <View key={productId} style={{ marginTop: 10 }}><View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}><Text numberOfLines={1} style={{ flex: 1, marginRight: 8, fontSize: 12, fontWeight: '800', color: TEXT_DARK }}>{product?.name || 'Purchased product'}</Text>{renderMobileStars(Number(mobileReviewProductRatings[productId] || 0), (value) => setMobileReviewProductRatings((current) => ({ ...current, [productId]: value })), `${product?.name || 'Product'} rating`)}</View><TextInput value={String(mobileReviewProductComments[productId] || '')} onChangeText={(text) => setMobileReviewProductComments((current) => ({ ...current, [productId]: text.slice(0, 1000) }))} placeholder="Optional product comment" style={{ marginTop: 5, borderWidth: 1, borderColor: '#f1d58a', borderRadius: 10, backgroundColor: '#fff', padding: 8 }} /></View>; })}<TouchableOpacity disabled={mobileReviewLoading || mobileReviewOverall < 1} onPress={() => void submitMobileReview(deliveredOrder)} style={{ marginTop: 14, borderRadius: 12, backgroundColor: mobileReviewOverall < 1 ? '#94a3b8' : PRIMARY_COLOR, paddingVertical: 12 }}><Text style={{ textAlign: 'center', color: '#fff', fontWeight: '900' }}>{mobileReviewLoading ? 'Saving review...' : mobileReviewExisting ? 'Update review' : 'Submit review'}</Text></TouchableOpacity>{mobileReviewMessage ? <Text style={{ marginTop: 8, fontSize: 12, fontWeight: '800', color: mobileReviewMessage.includes('saved') ? '#047857' : '#b91c1c' }}>{mobileReviewMessage}</Text> : null}</View>}
+        {!activeOrder && myOrders.find((order) => order.status === 'CANCELLED') && <View style={{ backgroundColor: '#fff', padding: 18, margin: 16, borderRadius: 22, borderWidth: 1, borderColor: '#fecaca' }}><Text style={{ fontSize: 14, fontWeight: '900', color: '#991b1b' }}>Order cancelled</Text><Text style={{ marginTop: 4, fontSize: 12, color: TEXT_MUTED }}>Order #{myOrders.find((order) => order.status === 'CANCELLED').id.split('-')[0].toUpperCase()} · No delivery is scheduled.</Text></View>}
+
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 4, gap: 8 }} accessibilityLabel="Product categories">
+          <TouchableOpacity onPress={() => setSelectedCategory('')} style={{ paddingHorizontal: 14, paddingVertical: 9, borderRadius: 18, backgroundColor: selectedCategory === '' ? PRIMARY_COLOR : '#fff', borderWidth: 1, borderColor: selectedCategory === '' ? PRIMARY_COLOR : '#dbe5df' }}><Text style={{ color: selectedCategory === '' ? '#fff' : TEXT_DARK, fontWeight: '900', fontSize: 12 }}>All</Text></TouchableOpacity>
+          {productCategories.map((category) => <TouchableOpacity key={category} onPress={() => setSelectedCategory(category)} style={{ paddingHorizontal: 14, paddingVertical: 9, borderRadius: 18, backgroundColor: selectedCategory === category ? PRIMARY_COLOR : '#fff', borderWidth: 1, borderColor: selectedCategory === category ? PRIMARY_COLOR : '#dbe5df' }}><Text style={{ color: selectedCategory === category ? '#fff' : TEXT_DARK, fontWeight: '900', fontSize: 12 }}>{category}</Text></TouchableOpacity>)}
+        </ScrollView>
 
         {searchQuery === '' && (
           <View style={styles.phonePeCard}>
             <Text style={styles.sectionTitle}>BILLS & RECHARGES</Text>
             <View style={styles.rechargeGrid}>
-              {[
+              {([
                 { n: 'Mobile', i: 'cellphone' }, { n: 'Postpaid', i: 'phone-check' }, 
                 { n: 'DTH', i: 'television-classic' }, { n: 'UPI Tools', i: 'bank-transfer' }, 
                 { n: 'FASTag', i: 'car-connected' }, { n: 'Electricity', i: 'flash' }, 
                 { n: 'Piped Gas', i: 'fire' }, { n: 'LPG Booking', i: 'gas-cylinder' }, 
                 { n: 'Water', i: 'water' }, { n: 'Broadband', i: 'wifi' }, 
                 { n: 'Loan EMI', i: 'bank' }, { n: 'Insurance', i: 'shield-check' }
-              ].map((item, idx) => (
+              ] as { n: string; i: MaterialIconName }[]).map((item, idx) => (
                 <TouchableOpacity key={idx} style={styles.gridItem} onPress={() => navigation.navigate('Recharge', { service: item.n })}>
                   <View style={styles.gridIcon}><MaterialCommunityIcons name={item.i} size={28} color={PRIMARY_COLOR} /></View>
                   <Text style={styles.gridLabel}>{item.n}</Text>
@@ -401,13 +597,50 @@ function HomeScreen({ navigation }) {
           </View>
         )}
 
+        {isLoggedIn && (favoriteProducts.length > 0 || recentlyPurchased.length > 0 || frequentCategories.length > 0) && searchQuery === '' && (
+          <View style={{ marginHorizontal: 16, marginBottom: 8, padding: 14, borderRadius: 18, backgroundColor: '#f7fbf8', borderWidth: 1, borderColor: '#dce8df' }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}><Text style={{ fontSize: 18, fontWeight: '900', color: '#173d27' }}>Quick Picks</Text><Text style={{ fontSize: 10, fontWeight: '900', color: '#5d8069' }}>FOR YOU</Text></View>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 10 }}>
+              {recentlyPurchased.length > 0 && <TouchableOpacity onPress={() => scrollViewRef.current?.scrollTo({ y: 0, animated: true })} style={{ paddingHorizontal: 12, paddingVertical: 9, borderRadius: 10, backgroundColor: '#fff', marginRight: 8 }}><Text style={{ color: '#087443', fontWeight: '900', fontSize: 12 }}>Buy Again</Text></TouchableOpacity>}
+              {favoriteProducts.length > 0 && <TouchableOpacity onPress={() => scrollViewRef.current?.scrollTo({ y: 0, animated: true })} style={{ paddingHorizontal: 12, paddingVertical: 9, borderRadius: 10, backgroundColor: '#fff', marginRight: 8 }}><Text style={{ color: '#087443', fontWeight: '900', fontSize: 12 }}>Favorites</Text></TouchableOpacity>}
+              {frequentCategories.map((category) => <TouchableOpacity key={category} onPress={() => { setSelectedCategory(category); scrollViewRef.current?.scrollToEnd({ animated: true }); }} style={{ paddingHorizontal: 12, paddingVertical: 9, borderRadius: 10, backgroundColor: '#fff', marginRight: 8 }}><Text style={{ color: '#087443', fontWeight: '900', fontSize: 12 }}>{category}</Text></TouchableOpacity>)}
+            </ScrollView>
+          </View>
+        )}
+
+        {isLoggedIn && favoriteProducts.length > 0 && searchQuery === '' && (
+          <View style={styles.section}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}><Text style={styles.sectionTitle}>Your Favorites</Text><Ionicons name="heart" size={20} color={PRIMARY_COLOR} /></View>
+            <Text style={{ color: TEXT_MUTED, fontSize: 12, marginBottom: 10 }}>Live prices and availability from your saved products.</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+              {favoriteProducts.slice(0, 10).map((product) => {
+                const unavailable = product.in_stock === false || (product.quantity !== null && Number(product.quantity) <= 0) || !product.vendor_id;
+                return <View key={product.id} style={{ width: 150, marginRight: 12, padding: 10, borderRadius: 16, borderWidth: 1, borderColor: '#e2e8f0', backgroundColor: '#fff' }}><Image source={{ uri: product.image_url }} style={{ height: 86, width: '100%' }} resizeMode="contain" /><Text numberOfLines={2} style={{ fontSize: 12, fontWeight: '800', color: TEXT_DARK }}>{product.name}</Text><Text style={{ fontWeight: '900', marginTop: 4 }}>₹{product.price}</Text>{unavailable ? <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 6 }}><Text style={{ color: '#dc2626', fontSize: 10, fontWeight: '800' }}>Unavailable</Text><TouchableOpacity onPress={() => toggleFavorite(product)}><Text style={{ color: TEXT_MUTED, fontSize: 10, fontWeight: '800' }}>Remove</Text></TouchableOpacity></View> : <TouchableOpacity onPress={() => addToCart(product)} style={{ marginTop: 7, paddingVertical: 7, borderRadius: 8, backgroundColor: ACCENT_COLOR }}><Text style={{ textAlign: 'center', color: '#047857', fontSize: 11, fontWeight: '900' }}>ADD</Text></TouchableOpacity>}</View>;
+              })}
+            </ScrollView>
+          </View>
+        )}
+
+        {isLoggedIn && recentlyPurchased.length > 0 && searchQuery === '' && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Recently Purchased</Text>
+            <Text style={{ color: TEXT_MUTED, fontSize: 12, marginBottom: 10 }}>Buy again at today&apos;s price and availability.</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+              {recentlyPurchased.map((product) => {
+                const unavailable = product.in_stock === false || (product.quantity !== null && Number(product.quantity) <= 0) || !product.vendor_id;
+                return <View key={product.id} style={{ width: 150, marginRight: 12, padding: 10, borderRadius: 16, borderWidth: 1, borderColor: '#e2e8f0', backgroundColor: '#fff' }}><Image source={{ uri: product.image_url }} style={{ height: 86, width: '100%' }} resizeMode="contain" /><Text numberOfLines={2} style={{ fontSize: 12, fontWeight: '800', color: TEXT_DARK }}>{product.name}</Text><Text style={{ fontWeight: '900', marginTop: 4 }}>₹{product.price}</Text>{unavailable ? <Text style={{ color: '#dc2626', fontSize: 10, fontWeight: '800', marginTop: 6 }}>Currently unavailable</Text> : <TouchableOpacity onPress={() => addToCart(product)} style={{ marginTop: 7, paddingVertical: 7, borderRadius: 8, backgroundColor: ACCENT_COLOR }}><Text style={{ textAlign: 'center', color: '#047857', fontSize: 11, fontWeight: '900' }}>ADD</Text></TouchableOpacity>}</View>;
+              })}
+            </ScrollView>
+          </View>
+        )}
+
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Grocery & Kitchen</Text>
           
           {products.length === 0 && searchQuery === '' ? (
             <ActivityIndicator size="large" color={PRIMARY_COLOR} style={{ marginTop: 30 }} />
           ) : filteredProducts.length === 0 ? (
-            <Text style={{color: TEXT_MUTED, marginTop: 10}}>No products found matching "{searchQuery}"</Text>
+            <View style={{ marginTop: 10 }}><Text style={{ color: TEXT_MUTED }}>No products found{normalizedSearch ? ` for "${searchQuery.trim()}"` : ''}.</Text><View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}><TouchableOpacity onPress={() => setSearchQuery('')} style={{ borderRadius: 10, backgroundColor: PRIMARY_COLOR, paddingHorizontal: 12, paddingVertical: 9 }}><Text style={{ color: '#fff', fontSize: 12, fontWeight: '900' }}>Clear search</Text></TouchableOpacity><TouchableOpacity onPress={() => setSelectedCategory('')} style={{ borderRadius: 10, borderWidth: 1, borderColor: PRIMARY_COLOR, paddingHorizontal: 12, paddingVertical: 9 }}><Text style={{ color: PRIMARY_COLOR, fontSize: 12, fontWeight: '900' }}>Browse all</Text></TouchableOpacity></View></View>
           ) : (
             <View style={styles.productGrid}>
               {filteredProducts.map((p) => {
@@ -415,11 +648,13 @@ function HomeScreen({ navigation }) {
                 return (
                   <View key={p.id} style={styles.productCard}>
                     <View style={styles.imageContainer}>
-                      <View style={styles.etaBadge}><Text style={styles.etaText}>12 MINS</Text></View>
+                      <TouchableOpacity accessibilityRole="button" accessibilityLabel={favoriteIds.has(String(p.id)) ? `Remove ${p.name} from favorites` : `Add ${p.name} to favorites`} onPress={() => toggleFavorite(p)} disabled={favoriteBusyId === String(p.id)} style={{ position: 'absolute', right: 8, top: 8, zIndex: 2, width: 34, height: 34, borderRadius: 17, backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center' }}><Ionicons name={favoriteIds.has(String(p.id)) ? 'heart' : 'heart-outline'} size={18} color={PRIMARY_COLOR} /></TouchableOpacity>
                       <Image source={{ uri: p.image_url }} style={styles.productImage} resizeMode="contain" />
                     </View>
                     <Text style={styles.unitText}>{p.weight || p.unit || 'N/A'}</Text>
                     <Text style={styles.productName} numberOfLines={2}>{p.name}</Text>
+                    {mobileProductAggregates[String(p.id)] ? <Text style={{ marginTop: 3, fontSize: 10, fontWeight: '900', color: '#b45309' }}>★ {Number(mobileProductAggregates[String(p.id)].average_rating || 0).toFixed(1)} ({Number(mobileProductAggregates[String(p.id)].review_count || 0)})</Text> : <Text style={{ marginTop: 3, fontSize: 10, color: '#94a3b8' }}>No reviews yet</Text>}
+                    <TouchableOpacity onPress={() => void openMobilePublicReviews(p)} style={{ marginTop: 3 }}><Text style={{ fontSize: 10, fontWeight: '900', color: PRIMARY_COLOR }}>See reviews</Text></TouchableOpacity>
                     <View style={styles.priceRow}>
                       <Text style={styles.priceText}>₹{p.price}</Text>
                       {inCart ? (
@@ -428,10 +663,10 @@ function HomeScreen({ navigation }) {
                           <Text style={[styles.qtyText, {color: TEXT_DARK}]}>{inCart.qty}</Text>
                           <TouchableOpacity onPress={() => addToCart(p)} style={styles.qtyBtn}><Ionicons name="add" size={16} color={TEXT_DARK} /></TouchableOpacity>
                         </View>
+                      ) : (p.in_stock === false || (p.quantity !== null && Number(p.quantity) <= 0)) ? (
+                        <View style={[styles.addButton, { borderColor: '#e2e8f0', backgroundColor: '#f8fafc' }]}><Text style={[styles.addButtonText, { color: '#94a3b8' }]}>UNAVAILABLE</Text></View>
                       ) : (
-                        <TouchableOpacity onPress={() => addToCart(p)} style={[styles.addButton, {borderColor: ACCENT_COLOR, backgroundColor: `${ACCENT_COLOR}15`}]}>
-                          <Text style={[styles.addButtonText, {color: '#047857'}]}>ADD</Text>
-                        </TouchableOpacity>
+                        <TouchableOpacity onPress={() => addToCart(p)} style={[styles.addButton, {borderColor: ACCENT_COLOR, backgroundColor: `${ACCENT_COLOR}15`}]}><Text style={[styles.addButtonText, {color: '#047857'}]}>ADD</Text></TouchableOpacity>
                       )}
                     </View>
                   </View>
@@ -441,6 +676,15 @@ function HomeScreen({ navigation }) {
           )}
         </View>
       </ScrollView>
+
+      <Modal visible={!!mobilePublicReviewsProduct} animationType="slide" transparent>
+        <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.45)' }}>
+          <View style={{ maxHeight: '82%', borderTopLeftRadius: 24, borderTopRightRadius: 24, backgroundColor: '#fff', padding: 20 }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}><View><Text style={{ fontSize: 18, fontWeight: '900', color: TEXT_DARK }}>Reviews for {mobilePublicReviewsProduct?.name}</Text><Text style={{ marginTop: 3, fontSize: 11, color: TEXT_MUTED }}>Verified purchases only</Text></View><TouchableOpacity accessibilityLabel="Close reviews" onPress={() => setMobilePublicReviewsProduct(null)}><Ionicons name="close-circle" size={28} color={TEXT_MUTED} /></TouchableOpacity></View>
+            <ScrollView style={{ marginTop: 14 }}><Text style={{ fontSize: 12, fontWeight: '900', color: TEXT_MUTED }}>{mobilePublicReviewsLoading ? 'Loading reviews...' : mobilePublicReviews.length ? '' : 'No written reviews yet.'}</Text>{mobilePublicReviews.map((review, index) => <View key={`${review.updated_at || review.created_at}-${index}`} style={{ marginTop: 10, borderWidth: 1, borderColor: '#e2e8f0', borderRadius: 14, padding: 12 }}><Text style={{ color: '#f59e0b', fontSize: 18 }}>{'★'.repeat(Number(review.rating || 0))}</Text><Text style={{ marginTop: 5, color: TEXT_DARK }}>{review.comment}</Text><View style={{ marginTop: 8, flexDirection: 'row', justifyContent: 'space-between' }}><Text style={{ fontSize: 10, fontWeight: '900', color: PRIMARY_COLOR }}>Verified purchase</Text><Text style={{ fontSize: 10, color: TEXT_MUTED }}>{new Date(review.updated_at || review.created_at).toLocaleDateString()}</Text></View></View>)}</ScrollView>
+          </View>
+        </View>
+      </Modal>
 
       {/* STICKY FOOTER CART */}
       {cart.length > 0 && (
@@ -520,7 +764,7 @@ function HomeScreen({ navigation }) {
             <TouchableOpacity 
               style={[styles.payButton, {backgroundColor: TEXT_DARK, justifyContent: 'center', opacity: !scanAmount ? 0.5 : 1}]} 
               disabled={!scanAmount}
-              onPress={() => { Alert.alert("Triggering Razorpay", `Amount: ₹${scanAmount}`); setScannedPayee(null); }}
+              onPress={() => Alert.alert('Payments unavailable', 'Merchant QR payments are not configured yet. No payment has been started.')}
             >
               <Text style={[styles.payButtonText, {color: 'white'}]}>Pay Securely</Text>
             </TouchableOpacity>
@@ -562,7 +806,8 @@ function HomeScreen({ navigation }) {
               <View style={styles.deliveryETAHeader}>
                 <Ionicons name="time-outline" size={24} color={PRIMARY_COLOR} />
                 <View style={{marginLeft: 10}}>
-                  <Text style={{fontSize: 16, fontWeight: 'bold', color: TEXT_DARK}}>Delivery in 20 minutes</Text>
+                  <Text style={{fontSize: 16, fontWeight: 'bold', color: TEXT_DARK}}>Delivery details</Text>
+                  <Text style={{fontSize: 11, color: TEXT_MUTED, marginTop: 2}}>Availability and total are validated before payment.</Text>
                 </View>
               </View>
 
@@ -578,7 +823,7 @@ function HomeScreen({ navigation }) {
                     <View style={[styles.qtyBoxSmall, {backgroundColor: ACCENT_COLOR}]}>
                       <TouchableOpacity onPress={() => removeFromCart(c.item.id)} style={styles.qtyBtnSmall}><Ionicons name="remove" size={14} color={TEXT_DARK} /></TouchableOpacity>
                       <Text style={[styles.qtyTextSmall, {color: TEXT_DARK}]}>{c.qty}</Text>
-                      <TouchableOpacity onPress={() => addToCart(c.item)} style={styles.qtyBtnSmall}><Ionicons name="add" size={14} color={TEXT_DARK} /></TouchableOpacity>
+                      <TouchableOpacity onPress={() => addToCart(c.item)} disabled={c.item.quantity !== null && c.qty >= Number(c.item.quantity)} style={[styles.qtyBtnSmall, c.item.quantity !== null && c.qty >= Number(c.item.quantity) && { opacity: 0.35 }]}><Ionicons name="add" size={14} color={TEXT_DARK} /></TouchableOpacity>
                     </View>
                   </View>
                 ))}
@@ -651,12 +896,14 @@ function HomeScreen({ navigation }) {
                   <Text style={{fontSize: 12, color: TEXT_MUTED}}>Delivering to the address</Text>
                   <Text style={styles.deliveringTo} numberOfLines={2}>{currentAddress}</Text>
                 </View>
-                <Text style={{color: PRIMARY_COLOR, fontWeight: 'bold', fontSize: 13}}>Change</Text>
+                <Text style={{color: PRIMARY_COLOR, fontWeight: 'bold', fontSize: 11}}>Choose below</Text>
               </View>
+              {savedAddresses.length > 0 && <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 10 }} contentContainerStyle={{ gap: 8 }}>{savedAddresses.map((address) => <TouchableOpacity key={address.id} onPress={() => setCurrentAddress(`${address.address_line || ''}${address.city ? `, ${address.city}` : ''}${address.state ? `, ${address.state}` : ''}${address.postal_code ? ` - ${address.postal_code}` : ''}`.trim())} style={{ borderRadius: 10, borderWidth: 1, borderColor: '#dbe5df', paddingHorizontal: 12, paddingVertical: 9, backgroundColor: '#fff' }}><Text style={{ fontSize: 11, fontWeight: '900', color: PRIMARY_COLOR }}>{address.label || 'Address'}</Text></TouchableOpacity>)}</ScrollView>}
               <View style={{height: 80}} />
             </ScrollView>
 
             <View style={styles.checkoutFooter}>
+               <Text style={{ position: 'absolute', left: 16, right: 16, bottom: 64, textAlign: 'center', color: TEXT_MUTED, fontSize: 10, fontWeight: '700' }}>Secure payment powered by Razorpay. Total and stock are checked again before payment.</Text>
                <View>
                  <Text style={styles.checkoutTotal}>₹{finalTotal}</Text>
                  <Text style={{color: PRIMARY_COLOR, fontSize: 10, fontWeight: '900', letterSpacing: 1}}>TOTAL</Text>
@@ -761,7 +1008,7 @@ function RechargeScreen({ route, navigation }) {
   const [isCheckingOut, setIsCheckingOut] = useState(false);
   const [userId, setUserId] = useState(null); 
   const [isLoading, setIsLoading] = useState(false);
-  const [plans, setPlans] = useState([]);
+  const [plans, setPlans] = useState<RechargePlan[]>([]);
   const [fetchedBill, setFetchedBill] = useState(null);
   const [selectedPlanCategory, setSelectedPlanCategory] = useState("All");
 
@@ -773,7 +1020,7 @@ function RechargeScreen({ route, navigation }) {
     const getUser = async () => {
       const { data } = await supabase.auth.getSession();
       if (data?.session) setUserId(data.session.user.id);
-    }
+    };
     getUser();
 
     if (number.length === 10 && service === 'Mobile') {
@@ -795,13 +1042,12 @@ function RechargeScreen({ route, navigation }) {
   const autoDetectAndFetchPlans = async (num) => {
     setIsLoading(true); setPlans([]);
     try {
-      const opRes = await fetch(`${BASE_URL}/api/fetch-operator?number=${num}&service=${service.toLowerCase()}`);
+      const opRes = await fetch(`${BASE_URL}/api/fetch-operator?number=${num}&service=${service.toLowerCase()}`, { headers: await customerUtilityHeaders() });
       const opText = await opRes.text();
-      let opData = {};
+      let opData: OperatorResponse = {};
       try { opData = JSON.parse(opText); } catch(e) {}
 
       if (opData && opData.operator) {
-        // Case-insensitive operator matching
         const foundOpKey = Object.keys(OPERATORS_DATA[service] || {}).find(
            k => k.toLowerCase() === opData.operator.toLowerCase() || k.toLowerCase().includes(opData.operator.toLowerCase())
         );
@@ -811,7 +1057,7 @@ function RechargeScreen({ route, navigation }) {
         const opCode = OPERATORS_DATA[service]?.[finalOperator];
         
         if (opCode) {
-          const planRes = await fetch(`${BASE_URL}/api/fetch-plans?number=${num}&operator=${opCode}&service=${service.toLowerCase()}`);
+          const planRes = await fetch(`${BASE_URL}/api/fetch-plans?number=${num}&operator=${opCode}&service=${service.toLowerCase()}`, { headers: await customerUtilityHeaders() });
           const planText = await planRes.text();
           try {
              const planData = JSON.parse(planText);
@@ -822,7 +1068,7 @@ function RechargeScreen({ route, navigation }) {
           } catch(e) {}
         }
       }
-    } catch (err) { console.log("Fetch Error", err); }
+    } catch (err) { if (__DEV__) console.error("Fetch Error", err instanceof Error ? err.message : 'unknown error'); }
     setIsLoading(false);
   };
 
@@ -831,7 +1077,7 @@ function RechargeScreen({ route, navigation }) {
     setIsLoading(true);
     try {
       const opCode = OPERATORS_DATA[service]?.[operator] || '2';
-      const res = await fetch(`${BASE_URL}/api/fetch-plans?number=${number}&operator=${opCode}&service=${service.toLowerCase()}`);
+      const res = await fetch(`${BASE_URL}/api/fetch-plans?number=${number}&operator=${opCode}&service=${service.toLowerCase()}`, { headers: await customerUtilityHeaders() });
       const text = await res.text();
       let data;
       try { data = JSON.parse(text); } catch(e) { throw new Error("Invalid response format"); }
@@ -852,7 +1098,7 @@ function RechargeScreen({ route, navigation }) {
     try {
       const opCode = OPERATORS_DATA[service]?.[operator] || '475';
       const safeService = service.toLowerCase().replace(/\s/g, ''); 
-      const res = await fetch(`${BASE_URL}/api/fetch-bill?service=${safeService}&number=${number}&operatorCode=${opCode}`);
+      const res = await fetch(`${BASE_URL}/api/fetch-bill?service=${safeService}&number=${number}&operatorCode=${opCode}`, { headers: await customerUtilityHeaders() });
       const data = await res.json();
       if (data.success && data.bill) { setFetchedBill(data.bill); setAmount(String(data.bill.DueAmount)); } 
       else { Alert.alert("Error", data.message || "Could not fetch bill details."); }
@@ -860,52 +1106,114 @@ function RechargeScreen({ route, navigation }) {
     setIsLoading(false);
   };
 
+  // 🚀 FIXED RECHARGE CHECKOUT HANDLER
   const handleRechargeSubmit = async () => {
-    if(!number || (!operator && service !== 'UPI Tools') || !amount) { Alert.alert("Incomplete Details", "Please fill all fields."); return; }
-    if(!userId) { Alert.alert("Login Required", "Please login from home screen to continue"); return; }
+    Alert.alert('Service unavailable', 'Recharge and bill-payment fulfillment is not configured. No payment has been started.');
+    return;
+
+    if (!number || (!operator && service !== 'UPI Tools') || !amount) { 
+      Alert.alert("Incomplete Details", "Please fill all fields."); 
+      return; 
+    }
+    if (!userId) { 
+      Alert.alert("Login Required", "Please login from home screen to continue"); 
+      return; 
+    }
     
+    const rechargeAmount = Number(amount);
+    if (!Number.isFinite(rechargeAmount) || rechargeAmount <= 0) {
+      Alert.alert("Invalid Amount", "Please enter a valid recharge amount.");
+      return;
+    }
+
     setIsCheckingOut(true);
     
     try {
       const orderResponse = await fetch(`${BASE_URL}/api/create-razorpay-order`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ amount: amount })
+        method: 'POST', 
+        headers: { 'Content-Type': 'application/json' }, 
+        body: JSON.stringify({ amount: rechargeAmount })
       });
+      
       const orderText = await orderResponse.text();
       let orderData;
-      try { orderData = JSON.parse(orderText); } catch(e) { throw new Error("Invalid backend response"); }
-      
-      const orderId = orderData.id || (orderData.order && orderData.order.id);
+      try { 
+        orderData = JSON.parse(orderText); 
+      } catch(e) { 
+        throw new Error("Invalid response from payment server."); 
+      }
+
+      if (!orderResponse.ok || !orderData.success) {
+        throw new Error(orderData.error || "Could not create payment order.");
+      }
+
+      const orderId = orderData.id || orderData.order?.id || orderData.orderId;
+      if (!orderId) { 
+        throw new Error("Razorpay Order ID was not received."); 
+      }
+
+      const razorpayKey = process.env.EXPO_PUBLIC_RAZORPAY_KEY_ID;
+
+      if (!razorpayKey) {
+        Alert.alert('Payment Error', 'Razorpay key is not configured.');
+        return;
+      }
 
       var options = { 
-        description: `${operator} ${service} Recharge`, 
+        description: `${operator || service} ${service} Recharge`, 
         image: ZESHU_LOGO_URL, 
         currency: orderData.currency || 'INR', 
-        key: process.env.EXPO_PUBLIC_RAZORPAY_KEY_ID || 'rzp_test_SZhZ5NLWfFtlJZ', 
-        amount: orderData.amount || (parseInt(amount) * 100), 
+        key: razorpayKey, 
+        amount: orderData.amount || (rechargeAmount * 100), 
         order_id: orderId, 
         name: 'ZESHU SUPER APP', 
         prefill: { email: 'customer@zeshu.in', contact: '9999999999', name: 'Zeshu User' }, 
         theme: { color: PRIMARY_COLOR } 
       };
 
-      RazorpayCheckout.open(options).then(async (data) => { 
-        try {
-          await fetch(`${BASE_URL}/api/process-recharge`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-              operatorCode: OPERATORS_DATA[service]?.[operator] || 'UPI', 
-              circleCode: 13, number: number, amount: amount, userId: userId, orderId: orderId 
-            })
-          });
-        } catch(e) {}
-        
-        Alert.alert('Payment Successful!', `🎉 You earned ₹${cashbackEarned} Cashback in Zeshu Coins!`); 
-        navigation.goBack(); 
-      }).catch((error) => { 
-        Alert.alert('Payment Failed', error.description || error.error?.description || `Checkout cancelled.`); 
+      const paymentData = await RazorpayCheckout.open(options);
+
+      if (!paymentData?.razorpay_payment_id || !paymentData?.razorpay_order_id || !paymentData?.razorpay_signature) {
+        throw new Error("Razorpay did not return complete payment verification data.");
+      }
+
+      // Verify signature on backend
+      const verificationResponse = await fetch(`${BASE_URL}/api/verify-razorpay-payment`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          razorpay_order_id: paymentData.razorpay_order_id,
+          razorpay_payment_id: paymentData.razorpay_payment_id,
+          razorpay_signature: paymentData.razorpay_signature,
+        }),
       });
-    } catch(err) {
-      Alert.alert("Network Error", "Could not reach payment gateway.");
+
+      const verificationData = await verificationResponse.json();
+      if (!verificationResponse.ok || !verificationData.success || !verificationData.verified) {
+        Alert.alert("Payment Verification Failed", "Your payment could not be verified securely.");
+        return;
+      }
+
+      // Process actual recharge via API
+      await fetch(`${BASE_URL}/api/process-recharge`, {
+        method: 'POST', 
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          operatorCode: OPERATORS_DATA[service]?.[operator] || 'UPI', 
+          circleCode: 13, 
+          number: number, 
+          amount: rechargeAmount, 
+          userId: userId, 
+          orderId: paymentData.razorpay_order_id,
+          paymentId: paymentData.razorpay_payment_id
+        })
+      });
+        
+      Alert.alert('Payment Successful!', `🎉 You earned ₹${cashbackEarned} Cashback in Zeshu Coins!`); 
+      navigation.goBack(); 
+
+    } catch (error) {
+      Alert.alert('Payment Failed', error?.description || error?.error?.description || error?.message || 'Checkout was cancelled.');
     } finally {
       setIsCheckingOut(false);
     }
@@ -1007,7 +1315,7 @@ function RechargeScreen({ route, navigation }) {
 export default function App() {
   return (
     <NavigationContainer>
-      <Stack.Navigator screenOptions={{ headerShown: false }}>
+      <Stack.Navigator id="zeshu-mobile" screenOptions={{ headerShown: false }}>
         <Stack.Screen name="Home" component={HomeScreen} />
         <Stack.Screen name="Recharge" component={RechargeScreen} />
       </Stack.Navigator>
@@ -1059,6 +1367,7 @@ const styles = StyleSheet.create({
   addButton: { borderWidth: 1, paddingHorizontal: 16, paddingVertical: 6, borderRadius: 6 },
   addButtonText: { fontWeight: '900', fontSize: 12 },
   qtyBox: { flexDirection: 'row', alignItems: 'center', borderRadius: 6, padding: 4 },
+  qtyBtn: { minWidth: 30, minHeight: 30, alignItems: 'center', justifyContent: 'center' },
   qtyText: { marginHorizontal: 10, fontWeight: 'bold' },
   
   stickyFooter: { position: 'absolute', bottom: 20, left: 16, right: 16 },
@@ -1067,9 +1376,11 @@ const styles = StyleSheet.create({
   cartTotalText: { color: 'white', fontWeight: 'bold', fontSize: 16 },
   cartItemCount: { color: 'white', fontSize: 11, opacity: 0.9, fontWeight: 'bold' },
   viewCartText: { color: 'white', fontWeight: 'bold', marginRight: 5, fontSize: 14 },
+  viewCartBtn: { flexDirection: 'row', alignItems: 'center' },
   
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
   modalContent: { backgroundColor: '#F9FAFB', borderTopLeftRadius: 20, borderTopRightRadius: 20, height: '92%' },
+  modalBody: { flex: 1 },
   modalHeader: { padding: 20, backgroundColor: 'white', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#eee' },
   modalTitle: { fontSize: 18, fontWeight: '900', color: TEXT_DARK },
   

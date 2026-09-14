@@ -8,24 +8,36 @@ export default function LoginScreen({ navigation }: any) {
   const [otp, setOtp] = useState('');
   const [isOtpSent, setIsOtpSent] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [sendError, setSendError] = useState('');
+  const [sendMessage, setSendMessage] = useState('');
 
   // 🚀 1. Send the OTP
   const sendOtp = async () => {
-    if (phoneNumber.length !== 10) {
+    const digits = phoneNumber.replace(/\D/g, '');
+    if (digits.length !== 10) {
       Alert.alert('Invalid Number', 'Please enter a valid 10-digit mobile number.');
       return;
     }
 
+    const phone = `+91${digits}`;
     setLoading(true);
-    const { error } = await supabase.auth.signInWithOtp({
-      phone: `+91${phoneNumber}`,
-    });
-    setLoading(false);
-
-    if (error) {
-      Alert.alert('Error', error.message);
-    } else {
+    setSendError('');
+    setSendMessage('');
+    try {
+      const { error } = await supabase.auth.signInWithOtp({ phone });
+      if (error) {
+        console.error('Rider OTP send failed:', error);
+        setSendError('We could not start OTP delivery. Check the number and try again later.');
+        return;
+      }
+      setPhoneNumber(digits);
+      setSendMessage('OTP sent. Enter the 6-digit code sent to your phone.');
       setIsOtpSent(true);
+    } catch (error) {
+      console.error('Rider OTP send failed unexpectedly:', error);
+      setSendError('We could not start OTP delivery. Check your connection and try again.');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -44,8 +56,9 @@ export default function LoginScreen({ navigation }: any) {
     });
     setLoading(false);
 
-    if (error) {
-      Alert.alert('Verification Failed', error.message);
+    if (error || !data.session || !data.user) {
+      if (error) console.error('Rider OTP verification failed:', error);
+      Alert.alert('Incorrect or expired OTP', 'Please try again or request a new OTP.');
     } else if (data.session) {
       // Success! Navigate to the Dashboard
       navigation.replace('Dashboard');
@@ -80,9 +93,11 @@ export default function LoginScreen({ navigation }: any) {
               keyboardType="number-pad"
               maxLength={10}
               value={phoneNumber}
-              onChangeText={setPhoneNumber}
+              onChangeText={(value) => { setPhoneNumber(value.replace(/\D/g, '')); setSendError(''); }}
             />
           </View>
+
+          {sendError ? <Text accessibilityRole="alert" style={{ color: '#b42318', fontSize: 13, fontWeight: '700', marginTop: -14, marginBottom: 16 }}>{sendError}</Text> : null}
 
           <TouchableOpacity 
             onPress={sendOtp} 
@@ -95,6 +110,7 @@ export default function LoginScreen({ navigation }: any) {
       ) : (
         // --- OTP VERIFICATION INPUT ---
         <View>
+           {sendMessage ? <Text accessibilityRole="alert" style={{ color: '#087443', fontSize: 13, fontWeight: '700', marginBottom: 16, textAlign: 'center' }}>{sendMessage}</Text> : null}
            <Text style={{ fontSize: 12, fontWeight: '800', color: '#94a3b8', textTransform: 'uppercase', marginBottom: 8, marginLeft: 4 }}>
             Enter 6-Digit OTP
           </Text>
@@ -117,6 +133,9 @@ export default function LoginScreen({ navigation }: any) {
             style={{ backgroundColor: otp.length === 6 ? '#8b5cf6' : '#c4b5fd', height: 64, borderRadius: 16, justifyContent: 'center', alignItems: 'center', shadowColor: '#8b5cf6', shadowOpacity: 0.3, shadowRadius: 10, elevation: 5 }}
           >
             {loading ? <ActivityIndicator color="#fff" /> : <Text style={{ color: '#fff', fontSize: 16, fontWeight: '900', textTransform: 'uppercase', letterSpacing: 1 }}>Verify & Login</Text>}
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => { setIsOtpSent(false); setOtp(''); setSendMessage(''); }} disabled={loading} style={{ alignSelf: 'center', marginTop: 18, minHeight: 44, justifyContent: 'center' }}>
+            <Text style={{ color: '#475467', fontWeight: '800' }}>Use a different number</Text>
           </TouchableOpacity>
         </View>
       )}
