@@ -10,6 +10,7 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { Picker } from '@react-native-picker/picker'; 
 import { CameraView, useCameraPermissions } from 'expo-camera'; 
+import MapView, { Marker, Region } from 'react-native-maps';
 
 // Database Connection
 import { supabase } from './supabase'; 
@@ -101,6 +102,20 @@ function HomeScreen({ navigation }) {
   const [tipAmount, setTipAmount] = useState(20); 
   const [isDonating, setIsDonating] = useState(true); 
   const [currentAddress, setCurrentAddress] = useState('HotelRoom 205, 2nd floor Shree Amardeep...');
+  const [locationSelectorOpen, setLocationSelectorOpen] = useState(false);
+  const [selectedLocation, setSelectedLocation] = useState<Region>({ latitude: 18.7989, longitude: 78.9117, latitudeDelta: 0.04, longitudeDelta: 0.04 });
+  const [locationAccuracy, setLocationAccuracy] = useState<number | null>(null);
+  const [selectedAddressId, setSelectedAddressId] = useState(null);
+  const [locationLabel, setLocationLabel] = useState('Home');
+  const [locationAddressLine, setLocationAddressLine] = useState('');
+  const [locationLandmark, setLocationLandmark] = useState('');
+  const [locationCity, setLocationCity] = useState('');
+  const [locationState, setLocationState] = useState('');
+  const [locationPostalCode, setLocationPostalCode] = useState('');
+  const [locationRecipientName, setLocationRecipientName] = useState('');
+  const [locationPhone, setLocationPhone] = useState('');
+  const [locationSaving, setLocationSaving] = useState(false);
+  const [locationMapTouched, setLocationMapTouched] = useState(false);
   const [isDetectingLoc, setIsDetectingLoc] = useState(false);
   const [isCheckingOut, setIsCheckingOut] = useState(false);
 
@@ -168,7 +183,23 @@ function HomeScreen({ navigation }) {
 
     const loadSavedAddresses = async () => {
       const { data } = await supabase.from('customer_addresses').select('*').order('is_default', { ascending: false }).order('created_at', { ascending: false });
-      setSavedAddresses(data || []);
+      const nextAddresses = data || [];
+      setSavedAddresses(nextAddresses);
+      const defaultAddress = nextAddresses[0];
+      if (defaultAddress) {
+        setSelectedAddressId(defaultAddress.id);
+        setLocationLabel(defaultAddress.label || 'Home');
+        setLocationAddressLine(defaultAddress.address_line || '');
+        setLocationLandmark(defaultAddress.landmark || '');
+        setLocationCity(defaultAddress.city || '');
+        setLocationState(defaultAddress.state || '');
+        setLocationPostalCode(defaultAddress.postal_code || '');
+        setLocationRecipientName(defaultAddress.recipient_name || '');
+        setLocationPhone(defaultAddress.phone || '');
+        setLocationAccuracy(defaultAddress.location_accuracy_meters ?? null);
+        setCurrentAddress(`${defaultAddress.address_line || ''}${defaultAddress.city ? `, ${defaultAddress.city}` : ''}${defaultAddress.state ? `, ${defaultAddress.state}` : ''}${defaultAddress.postal_code ? ` - ${defaultAddress.postal_code}` : ''}`.trim());
+        if (Number.isFinite(Number(defaultAddress.latitude)) && Number.isFinite(Number(defaultAddress.longitude))) setSelectedLocation((current) => ({ ...current, latitude: Number(defaultAddress.latitude), longitude: Number(defaultAddress.longitude) }));
+      }
     };
     loadSavedAddresses();
     
@@ -259,22 +290,25 @@ function HomeScreen({ navigation }) {
   }, [cart, favoriteProducts, recentlyPurchased, products]);
 
   const handleAutoDetectLocation = async () => {
+    if (isDetectingLoc) return;
+    setLocationMapTouched(false);
     setIsDetectingLoc(true);
     let { status } = await Location.requestForegroundPermissionsAsync();
     if (status !== 'granted') {
-      Alert.alert('Permission Denied', 'Allow location access for Real-time Geocoding.');
+      Alert.alert('Location permission is off', 'Search for your address or place the pin manually.');
+      setLocationSelectorOpen(true);
       setIsDetectingLoc(false);
       return;
     }
     try {
-      let location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Highest });
-      let addressArray = await Location.reverseGeocodeAsync(location.coords);
-      if (addressArray && addressArray.length > 0) {
-        const loc = addressArray[0];
-        setCurrentAddress(`${loc.name || loc.street}, ${loc.city}, ${loc.region}`);
-      }
+      const location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Highest, mayShowUserSettingsDialog: true });
+      const accuracy = Number(location.coords.accuracy);
+      setLocationAccuracy(Number.isFinite(accuracy) && accuracy >= 0 ? accuracy : null);
+      setSelectedLocation({ latitude: location.coords.latitude, longitude: location.coords.longitude, latitudeDelta: 0.01, longitudeDelta: 0.01 });
+      setLocationSelectorOpen(true);
     } catch (error) {
-      Alert.alert('GIS Error', 'Could not sync with Spatial Database.');
+      setLocationSelectorOpen(true);
+      Alert.alert('Location unavailable', 'We could not get a precise GPS location. Search or place the pin on the map.');
     }
     setIsDetectingLoc(false);
   };
@@ -471,7 +505,7 @@ function HomeScreen({ navigation }) {
       const { data: { session } } = await supabase.auth.getSession();
       const orderResponse = await fetch(`${BASE_URL}/api/create-razorpay-order`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session?.access_token || ''}` },
-        body: JSON.stringify({ cartItems: cart, deliveryAddress: currentAddress, isDonating, tipAmount, hasZeshuPass: false, zeshuCashAmount: requestedZeshuCash })
+        body: JSON.stringify({ cartItems: cart, deliveryAddress: currentAddress, deliveryAddressId: selectedAddressId, isDonating, tipAmount, hasZeshuPass: false, zeshuCashAmount: requestedZeshuCash })
       });
       
       const textRes = await orderResponse.text();
@@ -551,9 +585,77 @@ function HomeScreen({ navigation }) {
     }
   };
 
+  const saveConfirmedLocation = async () => {
+    if (locationSaving) return;
+    const selectedSavedAddress = savedAddresses.find((address) => address.id === selectedAddressId);
+    if (!selectedSavedAddress?.latitude && locationAccuracy === null && !locationMapTouched) {
+      Alert.alert('Confirm your location', 'Move the map to your delivery entrance before saving.');
+      return;
+    }
+    if (!locationLabel.trim() || !locationAddressLine.trim() || !locationCity.trim() || !locationState.trim()) {
+      Alert.alert('Address details required', 'Enter your label, house or street, city, and state before saving this location.');
+      return;
+    }
+    setLocationSaving(true);
+    const confirmedSource = locationMapTouched || locationAccuracy === null ? 'MANUAL_PIN' : 'DEVICE';
+    const { data, error } = await supabase.rpc('customer_upsert_address_with_location', {
+      p_address_id: selectedAddressId || null,
+      p_label: locationLabel.trim(),
+      p_recipient_name: locationRecipientName.trim() || null,
+      p_phone: locationPhone.trim() || null,
+      p_address_line: locationAddressLine.trim(),
+      p_landmark: locationLandmark.trim() || null,
+      p_city: locationCity.trim(),
+      p_state: locationState.trim(),
+      p_postal_code: locationPostalCode.trim() || null,
+      p_latitude: selectedLocation.latitude,
+      p_longitude: selectedLocation.longitude,
+      p_is_default: savedAddresses.length === 0 || !selectedAddressId,
+      p_location_accuracy_meters: confirmedSource === 'DEVICE' ? locationAccuracy : null,
+      p_location_source: confirmedSource,
+    });
+    setLocationSaving(false);
+    if (error) {
+      Alert.alert('Could not save location', 'Please check the address details and try again.');
+      return;
+    }
+    const saved = Array.isArray(data) ? data[0] : data;
+    if (saved?.id) setSelectedAddressId(saved.id);
+    setCurrentAddress(`${locationAddressLine.trim()}${locationCity.trim() ? `, ${locationCity.trim()}` : ''}${locationState.trim() ? `, ${locationState.trim()}` : ''}${locationPostalCode.trim() ? ` - ${locationPostalCode.trim()}` : ''}`);
+    setLocationSelectorOpen(false);
+    const { data: refreshed } = await supabase.from('customer_addresses').select('*').order('is_default', { ascending: false }).order('created_at', { ascending: false });
+    if (refreshed) setSavedAddresses(refreshed);
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="dark-content" backgroundColor="#fff" translucent={true} />
+      <Modal visible={locationSelectorOpen} animationType="slide" onRequestClose={() => setLocationSelectorOpen(false)}>
+        <SafeAreaView style={{ flex: 1, backgroundColor: '#fff' }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', padding: 16, borderBottomWidth: 1, borderBottomColor: '#e5e7eb' }}>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Close location selector" onPress={() => setLocationSelectorOpen(false)} style={{ minWidth: 44, minHeight: 44, justifyContent: 'center' }}><Ionicons name="close" size={26} color={TEXT_DARK} /></TouchableOpacity>
+            <Text style={{ fontSize: 18, fontWeight: '900', color: TEXT_DARK }}>Choose delivery location</Text>
+          </View>
+          <View style={{ flex: 1 }}>
+            <MapView accessibilityLabel="Delivery location map" style={{ flex: 1 }} region={selectedLocation} onPanDrag={() => setLocationMapTouched(true)} onRegionChangeComplete={setSelectedLocation} showsUserLocation>
+              <Marker coordinate={{ latitude: selectedLocation.latitude, longitude: selectedLocation.longitude }} />
+            </MapView>
+            <View pointerEvents="none" style={{ position: 'absolute', top: '50%', left: '50%', marginLeft: -18, marginTop: -36 }}><Text style={{ fontSize: 36 }}>📍</Text></View>
+            <View style={{ position: 'absolute', top: 14, left: 14, right: 14, backgroundColor: '#fff', borderRadius: 14, padding: 12, shadowOpacity: 0.15, shadowRadius: 8, elevation: 4 }}><Text style={{ fontSize: 13, fontWeight: '800', color: TEXT_MUTED }}>Search is available through your map provider. Move the map to your delivery entrance.</Text></View>
+          </View>
+          <View style={{ padding: 16, paddingBottom: 20, borderTopWidth: 1, borderTopColor: '#e5e7eb' }}>
+            <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 190 }}>
+              <TextInput accessibilityLabel="Address label" placeholder="Label (Home, Work)" placeholderTextColor="#9ca3af" value={locationLabel} onChangeText={setLocationLabel} style={{ minHeight: 44, borderWidth: 1, borderColor: '#dbe5df', borderRadius: 12, paddingHorizontal: 12, color: TEXT_DARK, marginBottom: 8 }} />
+              <TextInput accessibilityLabel="House or street" placeholder="Flat, house, building or street" placeholderTextColor="#9ca3af" value={locationAddressLine} onChangeText={setLocationAddressLine} style={{ minHeight: 44, borderWidth: 1, borderColor: '#dbe5df', borderRadius: 12, paddingHorizontal: 12, color: TEXT_DARK, marginBottom: 8 }} />
+              <TextInput accessibilityLabel="Landmark" placeholder="Landmark (optional)" placeholderTextColor="#9ca3af" value={locationLandmark} onChangeText={setLocationLandmark} style={{ minHeight: 44, borderWidth: 1, borderColor: '#dbe5df', borderRadius: 12, paddingHorizontal: 12, color: TEXT_DARK, marginBottom: 8 }} />
+              <View style={{ flexDirection: 'row', gap: 8 }}><TextInput accessibilityLabel="City" placeholder="City" placeholderTextColor="#9ca3af" value={locationCity} onChangeText={setLocationCity} style={{ flex: 1, minHeight: 44, borderWidth: 1, borderColor: '#dbe5df', borderRadius: 12, paddingHorizontal: 12, color: TEXT_DARK }} /><TextInput accessibilityLabel="State" placeholder="State" placeholderTextColor="#9ca3af" value={locationState} onChangeText={setLocationState} style={{ flex: 1, minHeight: 44, borderWidth: 1, borderColor: '#dbe5df', borderRadius: 12, paddingHorizontal: 12, color: TEXT_DARK }} /></View>
+              <TextInput accessibilityLabel="Postal code" placeholder="Postal code (optional)" placeholderTextColor="#9ca3af" value={locationPostalCode} onChangeText={setLocationPostalCode} keyboardType="numeric" style={{ minHeight: 44, borderWidth: 1, borderColor: '#dbe5df', borderRadius: 12, paddingHorizontal: 12, color: TEXT_DARK, marginTop: 8 }} />
+            </ScrollView>
+            <Text style={{ marginTop: 8, fontSize: 12, color: TEXT_MUTED }}>{locationAccuracy !== null && locationAccuracy <= 50 ? 'Location found.' : 'Pin your exact delivery location.'}</Text>
+            <TouchableOpacity disabled={locationSaving} accessibilityRole="button" accessibilityLabel="Save confirmed delivery location" onPress={() => void saveConfirmedLocation()} style={{ marginTop: 12, minHeight: 52, borderRadius: 14, backgroundColor: PRIMARY_COLOR, justifyContent: 'center', alignItems: 'center', opacity: locationSaving ? 0.6 : 1 }}><Text style={{ color: '#fff', fontWeight: '900' }}>{locationSaving ? 'Saving location...' : 'Save delivery location'}</Text></TouchableOpacity>
+          </View>
+        </SafeAreaView>
+      </Modal>
       
       {/* HEADER */}
       <View style={styles.header}>
@@ -938,7 +1040,7 @@ function HomeScreen({ navigation }) {
                 </View>
                 <Text style={{color: PRIMARY_COLOR, fontWeight: 'bold', fontSize: 11}}>Choose below</Text>
               </View>
-              {savedAddresses.length > 0 && <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 10 }} contentContainerStyle={{ gap: 8 }}>{savedAddresses.map((address) => <TouchableOpacity key={address.id} onPress={() => setCurrentAddress(`${address.address_line || ''}${address.city ? `, ${address.city}` : ''}${address.state ? `, ${address.state}` : ''}${address.postal_code ? ` - ${address.postal_code}` : ''}`.trim())} style={{ borderRadius: 10, borderWidth: 1, borderColor: '#dbe5df', paddingHorizontal: 12, paddingVertical: 9, backgroundColor: '#fff' }}><Text style={{ fontSize: 11, fontWeight: '900', color: PRIMARY_COLOR }}>{address.label || 'Address'}</Text></TouchableOpacity>)}</ScrollView>}
+{savedAddresses.length > 0 && <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 10 }} contentContainerStyle={{ gap: 8 }}>{savedAddresses.map((address) => <TouchableOpacity key={address.id} onPress={() => { setSelectedAddressId(address.id); setLocationLabel(address.label || 'Home'); setLocationAddressLine(address.address_line || ''); setLocationLandmark(address.landmark || ''); setLocationCity(address.city || ''); setLocationState(address.state || ''); setLocationPostalCode(address.postal_code || ''); setLocationRecipientName(address.recipient_name || ''); setLocationPhone(address.phone || ''); setLocationAccuracy(address.location_accuracy_meters ?? null); setCurrentAddress(`${address.address_line || ''}${address.city ? `, ${address.city}` : ''}${address.state ? `, ${address.state}` : ''}${address.postal_code ? ` - ${address.postal_code}` : ''}`.trim()); if (Number.isFinite(Number(address.latitude)) && Number.isFinite(Number(address.longitude))) setSelectedLocation((current) => ({ ...current, latitude: Number(address.latitude), longitude: Number(address.longitude) })); }} style={{ borderRadius: 10, borderWidth: 1, borderColor: selectedAddressId === address.id ? PRIMARY_COLOR : '#dbe5df', paddingHorizontal: 12, paddingVertical: 9, backgroundColor: '#fff' }}><Text style={{ fontSize: 11, fontWeight: '900', color: PRIMARY_COLOR }}>{address.label || 'Address'}</Text></TouchableOpacity>)}</ScrollView>}
               <View style={{height: 80}} />
             </ScrollView>
 
