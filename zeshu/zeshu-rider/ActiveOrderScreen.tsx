@@ -7,7 +7,12 @@ export default function ActiveOrderScreen({ route, navigation }: any) {
   const { order, riderId } = route.params;
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState(order.status || 'PENDING');
-  const hasDeliveryAddress = typeof order.delivery_address === 'string' && order.delivery_address.trim().length > 0;
+  const hasDestinationCoordinates = Number.isFinite(Number(order.delivery_latitude))
+    && Number(order.delivery_latitude) >= -90
+    && Number(order.delivery_latitude) <= 90
+    && Number.isFinite(Number(order.delivery_longitude))
+    && Number(order.delivery_longitude) >= -180
+    && Number(order.delivery_longitude) <= 180;
   let items: any[] = [];
   try { items = typeof order.items === 'string' ? JSON.parse(order.items) : order.items || []; } catch { items = []; }
 
@@ -21,8 +26,8 @@ export default function ActiveOrderScreen({ route, navigation }: any) {
 
   // 🗺️ 1. Open Google Maps (FIXED URL)
   const openMaps = () => {
-    if (!hasDeliveryAddress) return;
-    const address = encodeURIComponent(order.delivery_address.trim());
+    if (!hasDestinationCoordinates) return;
+    const address = encodeURIComponent(`${Number(order.delivery_latitude)},${Number(order.delivery_longitude)}`);
     const mapUrl = Platform.OS === 'web'
       ? `https://www.google.com/maps/search/?api=1&query=${address}`
       : Platform.OS === 'ios'
@@ -137,12 +142,12 @@ export default function ActiveOrderScreen({ route, navigation }: any) {
           </View>
 
           <View style={{ flexDirection: 'row', gap: 12 }}>
-            {hasDeliveryAddress ? <TouchableOpacity onPress={openMaps} style={{ flex: 1, backgroundColor: '#eff6ff', padding: 16, borderRadius: 16, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#bfdbfe' }}>
+            {hasDestinationCoordinates ? <TouchableOpacity onPress={openMaps} style={{ flex: 1, backgroundColor: '#eff6ff', padding: 16, borderRadius: 16, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#bfdbfe' }}>
               <Navigation color="#3b82f6" size={20} style={{ marginRight: 8 }} />
               <Text style={{ color: '#3b82f6', fontSize: 14, fontWeight: '900' }}>Navigate</Text>
             </TouchableOpacity> : null}
             
-            <TouchableOpacity disabled style={{ flex: hasDeliveryAddress ? 1 : undefined, opacity: 0.55, backgroundColor: '#f0fdf4', padding: 16, borderRadius: 16, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#bbf7d0' }}>
+            <TouchableOpacity disabled style={{ flex: hasDestinationCoordinates ? 1 : undefined, opacity: 0.55, backgroundColor: '#f0fdf4', padding: 16, borderRadius: 16, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: '#bbf7d0' }}>
               <Phone color="#16a34a" size={20} style={{ marginRight: 8 }} />
               <Text style={{ color: '#16a34a', fontSize: 14, fontWeight: '900' }}>Call unavailable</Text>
             </TouchableOpacity>

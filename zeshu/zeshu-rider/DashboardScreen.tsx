@@ -26,8 +26,10 @@ export default function DashboardScreen({ navigation }: any) {
   const locationSubscriptionRef = useRef<Location.LocationSubscription | null>(null);
   const locationStartingRef = useRef(false);
   const isOnlineRef = useRef(false);
+  const trackingEnabledRef = useRef(false);
 
   const stopLocationTracking = () => {
+    trackingEnabledRef.current = false;
     locationSubscriptionRef.current?.remove();
     locationSubscriptionRef.current = null;
     locationStartingRef.current = false;
@@ -39,6 +41,8 @@ export default function DashboardScreen({ navigation }: any) {
       .update({
         current_latitude: position.coords.latitude,
         current_longitude: position.coords.longitude,
+        current_location_accuracy_meters: Number.isFinite(position.coords.accuracy) ? position.coords.accuracy : null,
+        location_updated_at: new Date().toISOString(),
       })
       .eq('id', profileId)
       .eq('user_id', userId);
@@ -78,7 +82,7 @@ export default function DashboardScreen({ navigation }: any) {
           timeInterval: 60000,
         },
         (position) => {
-          if (!isOnlineRef.current) return;
+          if (!isOnlineRef.current || !trackingEnabledRef.current) return;
           void updateRiderLocation(position, profileId, userId).then((updated) => {
             if (!updated) setLocationStatus('Location unavailable');
           });
@@ -90,6 +94,10 @@ export default function DashboardScreen({ navigation }: any) {
       );
 
       if (!isOnlineRef.current) {
+        subscription.remove();
+        return;
+      }
+      if (!trackingEnabledRef.current) {
         subscription.remove();
         return;
       }
@@ -130,14 +138,17 @@ export default function DashboardScreen({ navigation }: any) {
   }, []);
 
   useEffect(() => {
-    if (!isOnline || !riderId || !sessionUserId) {
+    const hasActiveDelivery = orders.some((order) => ['READY_FOR_PICKUP', 'PICKED_UP', 'OUT_FOR_DELIVERY'].includes(String(order.status).toUpperCase()));
+    if (!isOnline || !riderId || !sessionUserId || !hasActiveDelivery) {
       stopLocationTracking();
       if (!isOnline) setLocationStatus('Offline');
       return;
     }
 
+    trackingEnabledRef.current = true;
     void startLocationWatcher(riderId, sessionUserId);
-  }, [isOnline, riderId, sessionUserId]);
+    return () => stopLocationTracking();
+  }, [isOnline, riderId, sessionUserId, orders]);
 
   useEffect(() => () => {
     stopLocationTracking();
@@ -156,6 +167,9 @@ export default function DashboardScreen({ navigation }: any) {
         { event: '*', schema: 'public', table: 'orders', filter: `rider_id=eq.${riderId}` },
         (payload) => {
           const nextOrder = payload.new as { id?: string; status?: string };
+          if (payload.eventType === 'UPDATE' && nextOrder.id && ['DELIVERED', 'CANCELLED'].includes(String(nextOrder.status || '').toUpperCase())) {
+            setOrders((current) => current.filter((order) => order.id !== nextOrder.id));
+          }
           if (payload.eventType === 'INSERT' || nextOrder.status === 'READY_FOR_PICKUP' || nextOrder.status === 'OUT_FOR_DELIVERY') setNewAssignmentId(nextOrder.id ?? null);
           fetchMyOrders();
         }
