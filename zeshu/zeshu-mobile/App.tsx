@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo, ComponentProps } from 'react';
 import { 
   StyleSheet, Text, View, ScrollView, TouchableOpacity, 
-  Image, TextInput, Modal, SafeAreaView, StatusBar, Dimensions, Alert, Platform, ActivityIndicator
+  Image, TextInput, Modal, SafeAreaView, StatusBar, Dimensions, Alert, Platform, ActivityIndicator, Linking
 } from 'react-native';
 import { Ionicons, MaterialCommunityIcons, FontAwesome5 } from '@expo/vector-icons';
 import * as Location from 'expo-location'; 
@@ -49,6 +49,55 @@ const parseHistoricalOrderItems = (order) => {
 const ORDER_STATUS_LABELS = { PENDING: 'Order placed', CONFIRMED: 'Confirmed', PREPARING: 'Being prepared', READY_FOR_PICKUP: 'Ready for pickup', PICKED_UP: 'Picked up', OUT_FOR_DELIVERY: 'Out for delivery', DELIVERED: 'Delivered', CANCELLED: 'Cancelled' };
 const ACTIVE_ORDER_STATUSES = ['PENDING', 'CONFIRMED', 'PREPARING', 'READY_FOR_PICKUP', 'PICKED_UP', 'OUT_FOR_DELIVERY'];
 const ORDER_TIMELINE_STATUSES = ['PENDING', 'CONFIRMED', 'PREPARING', 'READY_FOR_PICKUP', 'PICKED_UP', 'OUT_FOR_DELIVERY', 'DELIVERED'];
+const TRACKED_RIDER_STATUSES = ['PICKED_UP', 'OUT_FOR_DELIVERY'];
+
+type MobileRiderLocation = {
+  rider_id: string;
+  full_name: string | null;
+  is_active: boolean | null;
+  current_latitude: number | null;
+  current_longitude: number | null;
+  location_updated_at: string | null;
+};
+
+const isValidRiderCoordinate = (latitude: unknown, longitude: unknown) => {
+  return typeof latitude === 'number'
+    && Number.isFinite(latitude)
+    && latitude >= -90
+    && latitude <= 90
+    && typeof longitude === 'number'
+    && Number.isFinite(longitude)
+    && longitude >= -180
+    && longitude <= 180;
+};
+
+const normalizeRiderLocation = (value: unknown): MobileRiderLocation | null => {
+  if (!value || typeof value !== 'object') return null;
+  const row = value as Record<string, unknown>;
+  const riderId = typeof row.rider_id === 'string' ? row.rider_id : '';
+  const latitude = typeof row.current_latitude === 'number' ? row.current_latitude : Number(row.current_latitude);
+  const longitude = typeof row.current_longitude === 'number' ? row.current_longitude : Number(row.current_longitude);
+  const hasCoordinates = isValidRiderCoordinate(latitude, longitude);
+  return {
+    rider_id: riderId,
+    full_name: typeof row.full_name === 'string' ? row.full_name : null,
+    is_active: typeof row.is_active === 'boolean' ? row.is_active : null,
+    current_latitude: hasCoordinates ? latitude : null,
+    current_longitude: hasCoordinates ? longitude : null,
+    location_updated_at: typeof row.location_updated_at === 'string' ? row.location_updated_at : null,
+  };
+};
+
+const getRiderLocationFreshness = (locationUpdatedAt: unknown, now = Date.now()) => {
+  if (typeof locationUpdatedAt !== 'string') return { label: 'Location freshness unavailable', ageMinutes: null };
+  const updatedAt = Date.parse(locationUpdatedAt);
+  if (!Number.isFinite(updatedAt) || updatedAt > now) return { label: 'Location freshness unavailable', ageMinutes: null };
+  const ageMs = now - updatedAt;
+  const ageMinutes = Math.floor(ageMs / 60000);
+  if (ageMs <= 2 * 60 * 1000) return { label: 'Live location', ageMinutes };
+  if (ageMs <= 5 * 60 * 1000) return { label: 'Location delayed', ageMinutes };
+  return { label: 'Last known location', ageMinutes };
+};
 
 const PROVIDERS = {
   Mobile: ['Airtel', 'JIO', 'Vodafone', 'BSNL'],
@@ -144,6 +193,8 @@ function HomeScreen({ navigation }) {
   const [mobilePublicReviewsProduct, setMobilePublicReviewsProduct] = useState(null);
   const [mobilePublicReviews, setMobilePublicReviews] = useState([]);
   const [mobilePublicReviewsLoading, setMobilePublicReviewsLoading] = useState(false);
+  const [riderLocation, setRiderLocation] = useState<MobileRiderLocation | null>(null);
+  const [riderLocationNow, setRiderLocationNow] = useState(() => Date.now());
 
   const HANDLING_FEE = 5;
 
@@ -480,6 +531,59 @@ function HomeScreen({ navigation }) {
   const finalTotal = itemTotal > 0 ? (itemTotal + smallCartCharge + deliveryCharge + HANDLING_FEE + donationAmt + tipAmount - requestedZeshuCash) : 0;
   const activeOrder = myOrders.find((order) => ACTIVE_ORDER_STATUSES.includes(order?.status));
   const deliveredOrder = myOrders.find((order) => order.status === 'DELIVERED');
+  useEffect(() => {
+    const trackedStatus = String(activeOrder?.status || '').toUpperCase();
+    const orderId = typeof activeOrder?.id === 'string' ? activeOrder.id : '';
+    const riderId = typeof activeOrder?.rider_id === 'string' ? activeOrder.rider_id : '';
+    setRiderLocation(null);
+    setRiderLocationNow(Date.now());
+
+    if (!userId || !orderId || !TRACKED_RIDER_STATUSES.includes(trackedStatus) || !riderId) return;
+
+    let mounted = true;
+    const loadRiderLocation = async () => {
+      const { data, error } = await supabase
+        .from('rider_location_feed')
+        .select('rider_id,full_name,is_active,current_latitude,current_longitude,location_updated_at')
+        .eq('rider_id', riderId)
+        .maybeSingle();
+      if (!mounted) return;
+      if (error || !data) {
+        setRiderLocation(null);
+        return;
+      }
+      setRiderLocation(normalizeRiderLocation(data));
+    };
+    void loadRiderLocation();
+
+    const channel = supabase
+      .channel(`customer-mobile-rider-location-${orderId}-${riderId}`)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'rider_location_feed', filter: `rider_id=eq.${riderId}` }, (payload) => {
+        if (!mounted) return;
+        const next = payload.new as Record<string, unknown>;
+        if (next.rider_id && next.rider_id !== riderId) return;
+        setRiderLocation((current) => normalizeRiderLocation({ ...(current || {}), ...next, rider_id: riderId }));
+        setRiderLocationNow(Date.now());
+      })
+      .subscribe();
+    const freshnessTimer = setInterval(() => setRiderLocationNow(Date.now()), 30000);
+
+    return () => {
+      mounted = false;
+      clearInterval(freshnessTimer);
+      void supabase.removeChannel(channel);
+    };
+  }, [userId, activeOrder?.id, activeOrder?.status, activeOrder?.rider_id]);
+
+  const riderLocationFreshness = getRiderLocationFreshness(riderLocation?.location_updated_at, riderLocationNow);
+  const hasRiderCoordinates = Boolean(riderLocation && isValidRiderCoordinate(riderLocation.current_latitude, riderLocation.current_longitude));
+  const openRiderLocationInMaps = () => {
+    if (!riderLocation || !hasRiderCoordinates) return;
+    const coordinates = encodeURIComponent(`${riderLocation.current_latitude},${riderLocation.current_longitude}`);
+    Linking.openURL(`https://www.google.com/maps/search/?api=1&query=${coordinates}`).catch(() => {
+      Alert.alert('Maps unavailable', 'Could not open the rider location in Maps.');
+    });
+  };
   const renderMobileStars = (value, setter, label) => <View accessibilityLabel={label} style={{ flexDirection: 'row', marginTop: 5 }}>{[1, 2, 3, 4, 5].map((star) => <TouchableOpacity key={star} accessibilityRole="button" accessibilityLabel={`${label} ${star} star`} onPress={() => setter(star)}><Text style={{ color: star <= value ? '#f59e0b' : '#cbd5e1', fontSize: 26, marginRight: 2 }}>★</Text></TouchableOpacity>)}</View>;
 
   useEffect(() => {
@@ -712,8 +816,14 @@ function HomeScreen({ navigation }) {
         {activeOrder && <View style={{ backgroundColor: '#fff', padding: 20, margin: 16, borderRadius: 24, borderWidth: 1, borderColor: '#cfe8d7', elevation: 4 }}>
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 12 }}><View><Text style={{ fontSize: 14, fontWeight: '900', color: PRIMARY_COLOR, textTransform: 'uppercase' }}>Your active order</Text><Text style={{ marginTop: 3, fontSize: 16, fontWeight: '900', color: TEXT_DARK }}>{ORDER_STATUS_LABELS[activeOrder.status] || 'Order in progress'}</Text></View><View style={{ backgroundColor: '#eef8f1', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 }}><Text style={{ fontSize: 10, fontWeight: '900', color: PRIMARY_COLOR }}>#{activeOrder.id.split('-')[0].toUpperCase()}</Text></View></View>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 8 }} contentContainerStyle={{ flexGrow: 1, justifyContent: 'space-between' }}>{ORDER_TIMELINE_STATUSES.map((step) => { const orderIndex = ORDER_TIMELINE_STATUSES.indexOf(activeOrder.status); const stepIndex = ORDER_TIMELINE_STATUSES.indexOf(step); const complete = stepIndex <= orderIndex; return <View key={step} style={{ alignItems: 'center', width: 76 }}><View style={{ width: 30, height: 30, borderRadius: 15, backgroundColor: complete ? PRIMARY_COLOR : '#fff', borderWidth: 2, borderColor: complete ? PRIMARY_COLOR : '#dbe5df', justifyContent: 'center', alignItems: 'center' }}><Ionicons name={complete ? 'checkmark' : 'ellipse-outline'} size={14} color={complete ? '#fff' : '#94a3b8'} /></View><Text numberOfLines={2} style={{ marginTop: 6, textAlign: 'center', fontSize: 9, fontWeight: '800', color: complete ? PRIMARY_COLOR : '#64748b' }}>{ORDER_STATUS_LABELS[step]}</Text></View>; })}</ScrollView>
-          {activeOrder.delivery_address && <Text numberOfLines={2} style={{ marginTop: 12, fontSize: 11, color: TEXT_MUTED }}>Delivering to: {activeOrder.delivery_address}</Text>}
-        </View>}
+           {activeOrder.delivery_address && <Text numberOfLines={2} style={{ marginTop: 12, fontSize: 11, color: TEXT_MUTED }}>Delivering to: {activeOrder.delivery_address}</Text>}
+           {riderLocation && <View style={{ marginTop: 14, padding: 12, borderRadius: 14, backgroundColor: '#f8fafc', borderWidth: 1, borderColor: '#dbe5df' }}>
+             <Text style={{ fontSize: 12, fontWeight: '900', color: TEXT_DARK }}>Rider location</Text>
+             <Text style={{ marginTop: 5, fontSize: 12, fontWeight: '800', color: TEXT_DARK }}>{riderLocation.full_name || 'Your rider'} is {riderLocation.is_active ? 'online' : 'offline'}</Text>
+             <Text style={{ marginTop: 4, fontSize: 12, fontWeight: '800', color: riderLocationFreshness.label === 'Live location' ? PRIMARY_COLOR : TEXT_MUTED }}>{riderLocationFreshness.label}{riderLocationFreshness.ageMinutes !== null && riderLocationFreshness.label !== 'Live location' ? ` · Updated ${riderLocationFreshness.ageMinutes} min ago` : ''}</Text>
+             {hasRiderCoordinates ? <TouchableOpacity onPress={openRiderLocationInMaps} style={{ marginTop: 9, alignSelf: 'flex-start', borderRadius: 10, backgroundColor: '#e9f7ef', paddingHorizontal: 12, paddingVertical: 9 }}><Text style={{ color: PRIMARY_COLOR, fontSize: 11, fontWeight: '900' }}>Open rider location in Maps</Text></TouchableOpacity> : null}
+           </View>}
+         </View>}
         {!activeOrder && myOrders.find((order) => order.status === 'DELIVERED') && <View style={{ backgroundColor: '#fff', padding: 18, margin: 16, borderRadius: 22, borderWidth: 1, borderColor: '#dbe5df' }}><Text style={{ fontSize: 14, fontWeight: '900', color: TEXT_DARK }}>Your last order was delivered</Text><Text style={{ marginTop: 4, fontSize: 12, color: TEXT_MUTED }}>Order #{myOrders.find((order) => order.status === 'DELIVERED').id.split('-')[0].toUpperCase()} · ₹{Number(myOrders.find((order) => order.status === 'DELIVERED').total_paid || 0).toFixed(0)}</Text><View style={{ flexDirection: 'row', gap: 8, marginTop: 12 }}><TouchableOpacity onPress={() => reorderOrder(myOrders.find((order) => order.status === 'DELIVERED'))} style={{ borderRadius: 10, backgroundColor: PRIMARY_COLOR, paddingHorizontal: 14, paddingVertical: 10 }}><Text style={{ color: '#fff', fontWeight: '900', fontSize: 12 }}>Buy again</Text></TouchableOpacity><TouchableOpacity onPress={() => Alert.alert('Delivered order', myOrders.find((order) => order.status === 'DELIVERED').delivery_address || 'Delivery address unavailable.')} style={{ borderRadius: 10, borderWidth: 1, borderColor: PRIMARY_COLOR, paddingHorizontal: 14, paddingVertical: 10 }}><Text style={{ color: PRIMARY_COLOR, fontWeight: '900', fontSize: 12 }}>View details</Text></TouchableOpacity></View></View>}
         {!activeOrder && deliveredOrder && <View style={{ backgroundColor: '#fffbeb', padding: 18, marginHorizontal: 16, marginBottom: 16, borderRadius: 22, borderWidth: 1, borderColor: '#fde68a' }}><Text style={{ fontSize: 16, fontWeight: '900', color: TEXT_DARK }}>{mobileReviewExisting ? 'Edit your review' : 'Rate your order'}</Text><Text style={{ marginTop: 4, fontSize: 12, color: TEXT_MUTED }}>{mobileReviewExisting ? 'You rated this order before.' : 'Verified purchase'} · Order #{deliveredOrder.id.split('-')[0].toUpperCase()}</Text><Text style={{ marginTop: 12, fontSize: 12, fontWeight: '900', color: TEXT_DARK }}>Overall experience</Text>{renderMobileStars(mobileReviewOverall, setMobileReviewOverall, 'Overall experience')}<Text style={{ marginTop: 10, fontSize: 12, fontWeight: '900', color: TEXT_DARK }}>Store experience</Text>{renderMobileStars(mobileReviewStore, setMobileReviewStore, 'Store experience')}<Text style={{ marginTop: 10, fontSize: 12, fontWeight: '900', color: TEXT_DARK }}>Delivery experience</Text>{renderMobileStars(mobileReviewDelivery, setMobileReviewDelivery, 'Delivery experience')}<TextInput value={mobileReviewComment} onChangeText={(text) => setMobileReviewComment(text.slice(0, 1000))} placeholder="Optional comment (plain text)" multiline style={{ marginTop: 12, minHeight: 60, borderWidth: 1, borderColor: '#f1d58a', borderRadius: 12, backgroundColor: '#fff', padding: 10, textAlignVertical: 'top' }} />{parseHistoricalOrderItems(deliveredOrder).map(({ productId }) => { const product = products.find((item) => String(item.id) === productId); return <View key={productId} style={{ marginTop: 10 }}><View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}><Text numberOfLines={1} style={{ flex: 1, marginRight: 8, fontSize: 12, fontWeight: '800', color: TEXT_DARK }}>{product?.name || 'Purchased product'}</Text>{renderMobileStars(Number(mobileReviewProductRatings[productId] || 0), (value) => setMobileReviewProductRatings((current) => ({ ...current, [productId]: value })), `${product?.name || 'Product'} rating`)}</View><TextInput value={String(mobileReviewProductComments[productId] || '')} onChangeText={(text) => setMobileReviewProductComments((current) => ({ ...current, [productId]: text.slice(0, 1000) }))} placeholder="Optional product comment" style={{ marginTop: 5, borderWidth: 1, borderColor: '#f1d58a', borderRadius: 10, backgroundColor: '#fff', padding: 8 }} /></View>; })}<TouchableOpacity disabled={mobileReviewLoading || mobileReviewOverall < 1} onPress={() => void submitMobileReview(deliveredOrder)} style={{ marginTop: 14, borderRadius: 12, backgroundColor: mobileReviewOverall < 1 ? '#94a3b8' : PRIMARY_COLOR, paddingVertical: 12 }}><Text style={{ textAlign: 'center', color: '#fff', fontWeight: '900' }}>{mobileReviewLoading ? 'Saving review...' : mobileReviewExisting ? 'Update review' : 'Submit review'}</Text></TouchableOpacity>{mobileReviewMessage ? <Text style={{ marginTop: 8, fontSize: 12, fontWeight: '800', color: mobileReviewMessage.includes('saved') ? '#047857' : '#b91c1c' }}>{mobileReviewMessage}</Text> : null}</View>}
         {!activeOrder && myOrders.find((order) => order.status === 'CANCELLED') && <View style={{ backgroundColor: '#fff', padding: 18, margin: 16, borderRadius: 22, borderWidth: 1, borderColor: '#fecaca' }}><Text style={{ fontSize: 14, fontWeight: '900', color: '#991b1b' }}>Order cancelled</Text><Text style={{ marginTop: 4, fontSize: 12, color: TEXT_MUTED }}>Order #{myOrders.find((order) => order.status === 'CANCELLED').id.split('-')[0].toUpperCase()} · No delivery is scheduled.</Text></View>}
