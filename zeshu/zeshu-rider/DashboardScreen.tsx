@@ -1,11 +1,54 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, TouchableOpacity, FlatList, ActivityIndicator, Alert, Modal } from 'react-native';
+import { AppState, View, Text, TouchableOpacity, FlatList, ActivityIndicator, Alert, Modal } from 'react-native';
 import * as Location from 'expo-location';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import NetInfo from '@react-native-community/netinfo';
 import { supabase } from './supabase';
 import { MapPin, Navigation, Power, IndianRupee, History, X, CheckCircle2, LogOut } from 'lucide-react-native';
 
 const devLog = (...args: unknown[]) => {
   if (typeof __DEV__ !== 'undefined' && __DEV__) console.info(...args);
+};
+
+const PENDING_LOCATION_STORAGE_KEY = 'zeshu:rider-pending-location:v1';
+
+type PendingRiderLocation = {
+  latitude: number;
+  longitude: number;
+  accuracy: number | null;
+  locationUpdatedAt: string;
+  riderId: string;
+  userId: string;
+};
+
+const isValidPendingRiderLocation = (value: unknown): value is PendingRiderLocation => {
+  if (!value || typeof value !== 'object') return false;
+  const sample = value as Record<string, unknown>;
+  return typeof sample.latitude === 'number'
+    && Number.isFinite(sample.latitude)
+    && sample.latitude >= -90
+    && sample.latitude <= 90
+    && typeof sample.longitude === 'number'
+    && Number.isFinite(sample.longitude)
+    && sample.longitude >= -180
+    && sample.longitude <= 180
+    && (sample.accuracy === null || (typeof sample.accuracy === 'number' && Number.isFinite(sample.accuracy) && sample.accuracy >= 0))
+    && typeof sample.locationUpdatedAt === 'string'
+    && Number.isFinite(Date.parse(sample.locationUpdatedAt))
+    && typeof sample.riderId === 'string'
+    && sample.riderId.trim().length > 0
+    && typeof sample.userId === 'string'
+    && sample.userId.trim().length > 0;
+};
+
+const parsePendingRiderLocation = (raw: string | null): PendingRiderLocation | null => {
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return isValidPendingRiderLocation(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 };
 
 export default function DashboardScreen({ navigation }: any) {
@@ -27,6 +70,15 @@ export default function DashboardScreen({ navigation }: any) {
   const locationStartingRef = useRef(false);
   const isOnlineRef = useRef(false);
   const trackingEnabledRef = useRef(false);
+  const riderIdRef = useRef<string | null>(null);
+  const sessionUserIdRef = useRef<string | null>(null);
+  const ordersRef = useRef<any[]>([]);
+  const pendingLocationRef = useRef<PendingRiderLocation | null>(null);
+  const pendingStorageLoadRef = useRef<Promise<void> | null>(null);
+  const pendingPersistenceRef = useRef<Promise<void>>(Promise.resolve());
+  const pendingMutationRevisionRef = useRef(0);
+  const locationOperationInFlightRef = useRef(false);
+  const locationSessionRevisionRef = useRef(0);
 
   const stopLocationTracking = () => {
     trackingEnabledRef.current = false;
@@ -35,26 +87,209 @@ export default function DashboardScreen({ navigation }: any) {
     locationStartingRef.current = false;
   };
 
-  const updateRiderLocation = async (position: Location.LocationObject, profileId: string, userId: string) => {
-    const { error } = await supabase
-      .from('riders')
-      .update({
-        current_latitude: position.coords.latitude,
-        current_longitude: position.coords.longitude,
-        current_location_accuracy_meters: Number.isFinite(position.coords.accuracy) ? position.coords.accuracy : null,
-        location_updated_at: new Date().toISOString(),
-      })
-      .eq('id', profileId)
-      .eq('user_id', userId);
+  const ensurePendingStorageLoaded = async () => {
+    if (!pendingStorageLoadRef.current) {
+      pendingStorageLoadRef.current = AsyncStorage.getItem(PENDING_LOCATION_STORAGE_KEY)
+        .then(async (raw) => {
+          const parsed = parsePendingRiderLocation(raw);
+          if (pendingMutationRevisionRef.current === 0) pendingLocationRef.current = parsed;
+          if (raw && !parsed && pendingMutationRevisionRef.current === 0) {
+            try {
+              await AsyncStorage.removeItem(PENDING_LOCATION_STORAGE_KEY);
+            } catch (error) {
+              devLog('Could not clear malformed pending rider location:', error);
+            }
+          }
+        })
+        .catch((error) => {
+          pendingLocationRef.current = null;
+          devLog('Could not load pending rider location:', error);
+        });
+    }
+    await pendingStorageLoadRef.current;
+  };
 
-    if (error) {
-      devLog('Rider location update failed:', error);
-      return false;
+  const persistPendingLocation = async (sample: PendingRiderLocation) => {
+    if (!isValidPendingRiderLocation(sample)) return;
+    const persistOperation = pendingPersistenceRef.current.then(async () => {
+      await ensurePendingStorageLoaded();
+      const current = pendingLocationRef.current;
+      if (current && current.riderId === sample.riderId && current.userId === sample.userId) {
+        const currentAt = Date.parse(current.locationUpdatedAt);
+        const incomingAt = Date.parse(sample.locationUpdatedAt);
+        if (Number.isFinite(currentAt) && Number.isFinite(incomingAt) && currentAt >= incomingAt) return;
+      }
+
+      const revision = pendingMutationRevisionRef.current + 1;
+      pendingMutationRevisionRef.current = revision;
+      pendingLocationRef.current = sample;
+      if (revision !== pendingMutationRevisionRef.current || pendingLocationRef.current !== sample) return;
+      try {
+        await AsyncStorage.setItem(PENDING_LOCATION_STORAGE_KEY, JSON.stringify(sample));
+      } catch (error) {
+        devLog('Could not persist pending rider location:', error);
+      }
+    });
+    pendingPersistenceRef.current = persistOperation.catch(() => undefined);
+    await persistOperation;
+  };
+
+  const clearPendingLocation = async () => {
+    await ensurePendingStorageLoaded();
+    pendingMutationRevisionRef.current += 1;
+    pendingLocationRef.current = null;
+    try {
+      await AsyncStorage.removeItem(PENDING_LOCATION_STORAGE_KEY);
+    } catch (error) {
+      devLog('Could not clear pending rider location:', error);
+    }
+  };
+
+  const clearPendingLocationIfCurrent = async (expected: PendingRiderLocation) => {
+    await ensurePendingStorageLoaded();
+    if (pendingLocationRef.current !== expected) return;
+    pendingMutationRevisionRef.current += 1;
+    pendingLocationRef.current = null;
+    try {
+      await AsyncStorage.removeItem(PENDING_LOCATION_STORAGE_KEY);
+    } catch (error) {
+      devLog('Could not clear incompatible pending rider location:', error);
+    }
+    const newerPending = pendingLocationRef.current;
+    if (newerPending) {
+      try {
+        await AsyncStorage.setItem(PENDING_LOCATION_STORAGE_KEY, JSON.stringify(newerPending));
+      } catch (error) {
+        devLog('Could not restore newer pending rider location:', error);
+      }
+    }
+  };
+
+  const clearPendingLocationAfterSuccess = async (successfulSample: PendingRiderLocation) => {
+    await ensurePendingStorageLoaded();
+    const pending = pendingLocationRef.current;
+    if (!pending || pending.riderId !== successfulSample.riderId || pending.userId !== successfulSample.userId) return;
+    const pendingAt = Date.parse(pending.locationUpdatedAt);
+    const successfulAt = Date.parse(successfulSample.locationUpdatedAt);
+    if (!Number.isFinite(pendingAt) || !Number.isFinite(successfulAt) || pendingAt > successfulAt) return;
+
+    pendingMutationRevisionRef.current += 1;
+    pendingLocationRef.current = null;
+    try {
+      await AsyncStorage.removeItem(PENDING_LOCATION_STORAGE_KEY);
+    } catch (error) {
+      devLog('Could not clear uploaded rider location:', error);
     }
 
-    devLog('Rider location updated for authenticated profile.');
-    return true;
+    const newerPending = pendingLocationRef.current;
+    if (newerPending) {
+      try {
+        await AsyncStorage.setItem(PENDING_LOCATION_STORAGE_KEY, JSON.stringify(newerPending));
+      } catch (error) {
+        devLog('Could not restore newer pending rider location:', error);
+      }
+    }
   };
+
+  const canTrackLocationNow = () => {
+    const hasActiveDelivery = ordersRef.current.some((order) => ['READY_FOR_PICKUP', 'PICKED_UP', 'OUT_FOR_DELIVERY'].includes(String(order.status).toUpperCase()));
+    return Boolean(isOnlineRef.current && trackingEnabledRef.current && riderIdRef.current && sessionUserIdRef.current && hasActiveDelivery);
+  };
+
+  const writeLocationSample = async (sample: PendingRiderLocation, sessionRevision: number) => {
+    try {
+      const { error } = await supabase
+        .from('riders')
+        .update({
+          current_latitude: sample.latitude,
+          current_longitude: sample.longitude,
+          current_location_accuracy_meters: sample.accuracy,
+          location_updated_at: sample.locationUpdatedAt,
+        })
+        .eq('id', sample.riderId)
+        .eq('user_id', sample.userId);
+
+      if (error) {
+        devLog('Rider location update failed:', error);
+        if (sessionRevision === locationSessionRevisionRef.current) await persistPendingLocation(sample);
+        return false;
+      }
+
+      if (sessionRevision === locationSessionRevisionRef.current) await clearPendingLocationAfterSuccess(sample);
+      devLog('Rider location updated for authenticated profile.');
+      return true;
+    } catch (error) {
+      devLog('Rider location update failed:', error);
+      if (sessionRevision === locationSessionRevisionRef.current) await persistPendingLocation(sample);
+      return false;
+    }
+  };
+
+  const writePreparedLocation = async (sample: PendingRiderLocation) => {
+    if (locationOperationInFlightRef.current) {
+      await persistPendingLocation(sample);
+      return false;
+    }
+    locationOperationInFlightRef.current = true;
+    try {
+      return await writeLocationSample(sample, locationSessionRevisionRef.current);
+    } finally {
+      locationOperationInFlightRef.current = false;
+    }
+  };
+
+  const updateRiderLocation = async (position: Location.LocationObject, profileId: string, userId: string) => {
+    const sample: PendingRiderLocation = {
+      latitude: position.coords.latitude,
+      longitude: position.coords.longitude,
+      accuracy: Number.isFinite(position.coords.accuracy) ? position.coords.accuracy : null,
+      locationUpdatedAt: new Date().toISOString(),
+      riderId: profileId,
+      userId,
+    };
+    return writePreparedLocation(sample);
+  };
+
+  const flushPendingLocation = async () => {
+    if (locationOperationInFlightRef.current || !canTrackLocationNow()) return false;
+    locationOperationInFlightRef.current = true;
+    try {
+      await ensurePendingStorageLoaded();
+      const pending = pendingLocationRef.current;
+      const profileId = riderIdRef.current;
+      const userId = sessionUserIdRef.current;
+      if (!pending) return true;
+      if (!profileId || !userId || pending.riderId !== profileId || pending.userId !== userId) {
+        await clearPendingLocationIfCurrent(pending);
+        return false;
+      }
+      const flushed = await writeLocationSample(pending, locationSessionRevisionRef.current);
+      if (flushed) setLocationStatus('Tracking');
+      return flushed;
+    } finally {
+      locationOperationInFlightRef.current = false;
+    }
+  };
+
+  useEffect(() => {
+    void ensurePendingStorageLoaded();
+    const unsubscribeNetInfo = NetInfo.addEventListener((state) => {
+      if (state.isConnected === true && state.isInternetReachable !== false) void flushPendingLocation();
+    });
+    const appStateSubscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') void flushPendingLocation();
+    });
+    return () => {
+      unsubscribeNetInfo();
+      appStateSubscription.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    riderIdRef.current = riderId;
+    sessionUserIdRef.current = sessionUserId;
+    ordersRef.current = orders;
+  }, [riderId, sessionUserId, orders]);
 
   const getCurrentPosition = async () => {
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -122,6 +357,7 @@ export default function DashboardScreen({ navigation }: any) {
         return;
       }
       setSessionUserId(user.id);
+      sessionUserIdRef.current = user.id;
       const { data, error } = await supabase.from('riders').select('id,is_active').eq('user_id', user.id).maybeSingle();
       devLog('Rider profile lookup result:', data ?? null);
       if (error) devLog('Rider profile lookup error:', error);
@@ -131,6 +367,7 @@ export default function DashboardScreen({ navigation }: any) {
       }
       setAvailabilityMessage('');
       setRiderId(data.id);
+      riderIdRef.current = data.id;
       setIsOnline(Boolean(data.is_active));
       isOnlineRef.current = Boolean(data.is_active);
     };
@@ -147,6 +384,7 @@ export default function DashboardScreen({ navigation }: any) {
 
     trackingEnabledRef.current = true;
     void startLocationWatcher(riderId, sessionUserId);
+    void flushPendingLocation();
     return () => stopLocationTracking();
   }, [isOnline, riderId, sessionUserId, orders]);
 
@@ -168,7 +406,11 @@ export default function DashboardScreen({ navigation }: any) {
         (payload) => {
           const nextOrder = payload.new as { id?: string; status?: string };
           if (payload.eventType === 'UPDATE' && nextOrder.id && ['DELIVERED', 'CANCELLED'].includes(String(nextOrder.status || '').toUpperCase())) {
-            setOrders((current) => current.filter((order) => order.id !== nextOrder.id));
+            setOrders((current) => {
+              const nextOrders = current.filter((order) => order.id !== nextOrder.id);
+              ordersRef.current = nextOrders;
+              return nextOrders;
+            });
           }
           if (payload.eventType === 'INSERT' || nextOrder.status === 'READY_FOR_PICKUP' || nextOrder.status === 'OUT_FOR_DELIVERY') setNewAssignmentId(nextOrder.id ?? null);
           fetchMyOrders();
@@ -198,6 +440,7 @@ export default function DashboardScreen({ navigation }: any) {
       // Set Active Orders
       const active = data.filter(o => ['READY_FOR_PICKUP', 'PICKED_UP', 'OUT_FOR_DELIVERY'].includes(o.status));
       setOrders(active);
+      ordersRef.current = active;
 
       // Set History Orders
       const delivered = data.filter(o => o.status?.toUpperCase() === 'DELIVERED');
@@ -240,6 +483,8 @@ export default function DashboardScreen({ navigation }: any) {
 
     setSessionUserId(user.id);
     setRiderId(profile.id);
+    sessionUserIdRef.current = user.id;
+    riderIdRef.current = profile.id;
 
     if (next) {
       setLocationStatus('Location unavailable');
@@ -322,6 +567,11 @@ export default function DashboardScreen({ navigation }: any) {
     setHistoryOrders([]);
     setRiderId(null);
     setSessionUserId(null);
+    riderIdRef.current = null;
+    sessionUserIdRef.current = null;
+    ordersRef.current = [];
+    locationSessionRevisionRef.current += 1;
+    await clearPendingLocation();
     stopLocationTracking();
     setLocationStatus('Offline');
     isOnlineRef.current = false;
